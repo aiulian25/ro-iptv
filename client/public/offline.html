@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>RO-IPTV — Offline</title>
+    <style>
+      body {
+        margin: 0;
+        height: 100vh;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        background: #0d0f1a;
+        color: #e0e3e5;
+        font-family: system-ui, sans-serif;
+        text-align: center;
+        padding: 24px;
+      }
+      .logo { color: #c0c1ff; font-size: 28px; font-weight: 700; letter-spacing: -0.02em; }
+      h1 { font-size: 22px; margin: 16px 0 8px; }
+      p { color: #c7c4d7; max-width: 360px; }
+      button {
+        margin-top: 24px;
+        background: #c0c1ff;
+        color: #1000a9;
+        border: none;
+        padding: 12px 28px;
+        border-radius: 9999px;
+        font-size: 16px;
+        font-weight: 600;
+        cursor: pointer;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="logo">RO-IPTV</div>
+    <h1>You're offline</h1>
+    <p>Live streams need an internet connection. Cached channels, logos and EPG data are still available once you're back online.</p>
+    <button onclick="location.reload()">Retry</button>
+  </body>
+</html>

@@ -1,0 +1,60 @@
+/** @type {import('tailwindcss').Config} */
+export default {
+  darkMode: 'class',
+  content: ['./index.html', './src/**/*.{js,jsx}'],
+  theme: {
+    extend: {
+      colors: {
+        // App brand base (spec) blended with the "Cinematic Obsidian" design system.
+        navy: '#0D0F1A',
+        background: '#0D0F1A',
+        surface: '#101415',
+        'surface-container-lowest': '#0b0f10',
+        'surface-container-low': '#191c1e',
+        'surface-container': '#1d2022',
+        'surface-container-high': '#272a2c',
+        'surface-container-highest': '#323537',
+        'surface-variant': '#323537',
+        'surface-bright': '#363a3b',
+        'on-surface': '#e0e3e5',
+        'on-surface-variant': '#c7c4d7',
+        outline: '#908fa0',
+        'outline-variant': '#464554',
+        primary: '#c0c1ff',
+        'primary-container': '#8083ff',
+        'on-primary': '#1000a9',
+        'on-primary-container': '#0d0096',
+        'inverse-primary': '#494bd6',
+        secondary: '#ddb7ff',
+        'secondary-container': '#6f00be',
+        'on-secondary-container': '#d6a9ff',
+        tertiary: '#bec6e0',
+        error: '#ffb4ab',
+        'on-error': '#690005',
+      },
+      fontFamily: {
+        sans: ['Hanken Grotesk', 'system-ui', 'sans-serif'],
+        mono: ['JetBrains Mono', 'ui-monospace', 'monospace'],
+      },
+      borderRadius: {
+        DEFAULT: '0.5rem',
+        md: '0.75rem',
+        lg: '1rem',
+        xl: '1.5rem',
+      },
+      keyframes: {
+        spinSlow: { from: { transform: 'rotate(0deg)' }, to: { transform: 'rotate(360deg)' } },
+        bounceBar: { from: { height: '4px' }, to: { height: '40px' } },
+        shimmer: { '0%': { backgroundPosition: '-200% 0' }, '100%': { backgroundPosition: '200% 0' } },
+        fadeIn: { from: { opacity: 0, transform: 'translateY(8px)' }, to: { opacity: 1, transform: 'translateY(0)' } },
+      },
+      animation: {
+        'spin-slow': 'spinSlow 6s linear infinite',
+        'bounce-bar': 'bounceBar 1s ease-in-out infinite alternate',
+        shimmer: 'shimmer 3s infinite',
+        'fade-in': 'fadeIn 0.4s ease-out',
+      },
+    },
+  },
+  plugins: [],
+};

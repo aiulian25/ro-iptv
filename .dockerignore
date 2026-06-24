@@ -1,0 +1,9 @@
+**/node_modules
+**/dist
+**/.git
+**/.env
+**/.DS_Store
+**/npm-debug.log
+data
+stitch_landing_page_ui_refinement*
+Prompt to build.txt

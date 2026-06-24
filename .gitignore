@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.env
+data/
+*.log
+.DS_Store
+client/dev-dist/
+sbom.spdx.json
