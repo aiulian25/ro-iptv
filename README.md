@@ -38,29 +38,13 @@ docker run -d --name ro-iptv -p 56892:56892 \
   ghcr.io/aiulian25/ro-iptv:latest
 ```
 
-…or with Compose (create a `docker-compose.yml`):
-
-```yaml
-services:
-  ro-iptv:
-    image: ghcr.io/aiulian25/ro-iptv:latest
-    container_name: ro-iptv
-    restart: unless-stopped
-    ports: ["56892:56892"]
-    environment:
-      - TZ=Europe/London
-      - AUTH_PASSWORD=admin        # set to require login; empty = open
-    volumes: ["data:/data"]
-    read_only: true
-    tmpfs: ["/tmp"]
-    cap_drop: ["ALL"]
-    security_opt: ["no-new-privileges:true"]
-volumes:
-  data:
-```
+…or with **Docker Compose** — grab [`docker-compose.yml`](docker-compose.yml)
+from this repo (it already pulls the published image, with hardening and
+sensible defaults) and run:
 
 ```bash
-docker compose up -d
+docker compose up -d            # start
+docker compose pull && docker compose up -d   # later: update to the latest image
 ```
 
 Then open **http://localhost:56892**
@@ -71,10 +55,11 @@ That's the whole thing — a **single image** where one Express process serves b
 
 ### Build from source (optional)
 
-End users don't need this — pull the image above. To build it yourself:
+End users don't need this — pull the image above. To build it yourself, use the
+build compose file:
 
 ```bash
-docker compose up -d --build      # builds the local image and runs it
+docker compose -f docker-compose.build.yml up -d --build
 ```
 
 ---
@@ -214,8 +199,9 @@ their CORS headers.
 ├── server/                 # Express API + static host
 │   └── lib/                # auth, m3u, epg, ffmpeg recorder, json store
 ├── Dockerfile              # multi-stage: build client → hardened Express runtime
-├── docker-compose.yml      # runtime hardening (read-only FS, dropped caps, limits)
-├── Makefile                # build + `make scan` (Trivy/Grype/hadolint/SBOM)
+├── docker-compose.yml      # ready-to-deploy — pulls the published GHCR image
+├── docker-compose.build.yml# build the image from source
+├── Makefile                # build/release + `make scan` (Trivy/Grype/hadolint/SBOM)
 └── .env.example
 ```
 

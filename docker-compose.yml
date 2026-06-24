@@ -1,78 +1,75 @@
+# RO-IPTV — ready-to-deploy stack.
+#
+# Pulls the prebuilt MULTI-ARCH image (linux/amd64 + linux/arm64) from GHCR — no
+# build needed. The right image for your hardware (PC, mini-PC, Synology, ARM
+# board, server) is selected automatically.
+#
+#   docker compose up -d        # start
+#   docker compose pull && docker compose up -d   # update to the latest image
+#
+# To build the image from source instead, use docker-compose.build.yml.
+# Values below can be overridden from a .env file (see .env.example).
+
 services:
   ro-iptv:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: ro-iptv:latest
+    image: ghcr.io/aiulian25/ro-iptv:latest
     container_name: ro-iptv
     restart: unless-stopped
 
-    # ---- Runtime hardening (§2) --------------------------------
-    # Proper PID 1: forwards signals and reaps ffmpeg children (no zombies).
-    init: true
-    # Block privilege escalation and drop ALL Linux capabilities — the app binds
-    # an unprivileged port (56892) and ffmpeg needs none, so nothing is added back.
-    security_opt:
-      - no-new-privileges:true
-      - apparmor=docker-default
-    cap_drop:
-      - ALL
-    # Read-only root filesystem; only the data volume (below) and a small tmpfs
-    # are writable. All app writes (JSON store, playlists, recordings) live in /data.
-    read_only: true
-    tmpfs:
-      - /tmp:size=64m,mode=1777
-    # Resource ceilings to blunt DoS / runaway usage. Generous, env-overridable
-    # defaults so large EPG decompression and concurrent recordings aren't starved.
-    mem_limit: ${MEM_LIMIT:-1024m}
-    cpus: ${CPU_LIMIT:-2}
-    pids_limit: ${PIDS_LIMIT:-256}
-    ulimits:
-      nofile:
-        soft: ${NOFILE_SOFT:-4096}
-        hard: ${NOFILE_HARD:-8192}
-    # Cap log growth so logs can't fill the host disk.
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
-    # -----------------------------------------------------------------------
-
     ports:
-      # host:container — app (API + PWA frontend) served on 56892
+      # host:container — open the app at http://<your-host>:56892
       - "56892:56892"
+
     environment:
-      - PORT=56892
+      # Timezone (affects the clock and EPG times).
       - TZ=${TZ:-Europe/London}
-      - DATA_DIR=/data
-      # Optional: auto-load a playlist / EPG on first start
+
+      # --- Authentication ---------------------------------------------------
+      # Login is ON by default. The first sign-in uses admin / admin and then
+      # FORCES you to set a new password (stored in the /data volume); the
+      # default stops working afterwards. To run with NO login, set
+      # AUTH_PASSWORD to an empty value.
+      - AUTH_USERNAME=${AUTH_USERNAME:-admin}
+      - AUTH_PASSWORD=${AUTH_PASSWORD:-admin}
+      - AUTH_SESSION_DAYS=${AUTH_SESSION_DAYS:-30}
+
+      # --- Optional ---------------------------------------------------------
+      # Auto-load a playlist / EPG on first start:
       - M3U_URL=${M3U_URL:-}
       - EPG_URL=${EPG_URL:-}
       - REFRESH_INTERVAL_MINUTES=${REFRESH_INTERVAL_MINUTES:-360}
-      # Max length of a single recording (minutes) — a capture auto-stops at this cap
+      # Max length of a single recording, in minutes (auto-stops at the cap):
       - RECORDING_MAX_MINUTES=${RECORDING_MAX_MINUTES:-180}
-      # Comma-separated domains/origins allowed to call the API cross-origin.
-      # Empty = allow any (the app is same-origin, so this is a hardening option).
+      # Lock the API to specific origins (comma-separated host / host:port /
+      # origin). Empty = allow any (the app is same-origin anyway):
       - CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS:-}
-      # Authentication — auth is ON when AUTH_PASSWORD is set, OFF (open) when empty.
-      - AUTH_USERNAME=${AUTH_USERNAME:-admin}
-      - AUTH_PASSWORD=${AUTH_PASSWORD:-}
-      - AUTH_SESSION_DAYS=${AUTH_SESSION_DAYS:-30}
-      - AUTH_SESSION_SECRET=${AUTH_SESSION_SECRET:-}
-      # Security tunables (read by the app at runtime).
-      - HSTS_MAX_AGE=${HSTS_MAX_AGE:-15552000}
-      - RATE_LIMIT_DISABLED=${RATE_LIMIT_DISABLED:-}
-      - RL_UPSTREAM_MAX=${RL_UPSTREAM_MAX:-120}
-      - RL_WRITE_MAX=${RL_WRITE_MAX:-120}
-      - RL_LOGIN_MAX=${RL_LOGIN_MAX:-10}
+
     volumes:
+      # Playlists, recordings (and their files) and the auth credential.
+      # Persists across container updates.
       - data:/data
+
+    # --- Hardening (safe defaults; remove a line if your platform objects) ---
+    init: true                       # proper PID 1 — reaps ffmpeg children
+    read_only: true                  # immutable root FS; only /data + /tmp write
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL                          # the app needs no Linux capabilities
+    security_opt:
+      - no-new-privileges:true
+
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:56892/api/health"]
       interval: 30s
       timeout: 5s
       retries: 3
+
+    logging:                         # cap log growth so it can't fill the disk
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 volumes:
   data:

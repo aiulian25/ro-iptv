@@ -16,7 +16,7 @@ VERSION    ?= latest
 PLATFORMS  ?= linux/amd64,linux/arm64
 BUILDER    ?= multiarch
 
-.PHONY: help build up down logs scan hadolint trivy grype sbom clean-scan login buildx-init release
+.PHONY: help build deploy up down logs scan hadolint trivy grype sbom clean-scan login buildx-init release
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -25,8 +25,11 @@ help: ## Show this help
 build: ## Build the single-image container
 	docker build -t $(IMAGE_TAG) -f $(DOCKERFILE) .
 
-up: ## Build + (re)start via docker compose
-	docker compose up -d --build
+deploy: ## Pull the published image and start (no build)
+	docker compose up -d
+
+up: ## Build from source and (re)start the local image
+	docker compose -f docker-compose.build.yml up -d --build
 
 down: ## Stop the stack
 	docker compose down

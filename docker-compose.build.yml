@@ -1,0 +1,79 @@
+services:
+  ro-iptv:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ro-iptv:latest
+    container_name: ro-iptv
+    restart: unless-stopped
+
+    # ---- Runtime hardening (§2) --------------------------------
+    # Proper PID 1: forwards signals and reaps ffmpeg children (no zombies).
+    init: true
+    # Block privilege escalation and drop ALL Linux capabilities — the app binds
+    # an unprivileged port (56892) and ffmpeg needs none, so nothing is added back.
+    security_opt:
+      - no-new-privileges:true
+      - apparmor=docker-default
+    cap_drop:
+      - ALL
+    # Read-only root filesystem; only the data volume (below) and a small tmpfs
+    # are writable. All app writes (JSON store, playlists, recordings) live in /data.
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    # Resource ceilings to blunt DoS / runaway usage. Generous, env-overridable
+    # defaults so large EPG decompression and concurrent recordings aren't starved.
+    mem_limit: ${MEM_LIMIT:-1024m}
+    cpus: ${CPU_LIMIT:-2}
+    pids_limit: ${PIDS_LIMIT:-256}
+    ulimits:
+      nofile:
+        soft: ${NOFILE_SOFT:-4096}
+        hard: ${NOFILE_HARD:-8192}
+    # Cap log growth so logs can't fill the host disk.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    # -----------------------------------------------------------------------
+
+    ports:
+      # host:container — app (API + PWA frontend) served on 56892
+      - "56892:56892"
+    environment:
+      - PORT=56892
+      - TZ=${TZ:-Europe/London}
+      - DATA_DIR=/data
+      # Optional: auto-load a playlist / EPG on first start
+      - M3U_URL=${M3U_URL:-}
+      - EPG_URL=${EPG_URL:-}
+      - REFRESH_INTERVAL_MINUTES=${REFRESH_INTERVAL_MINUTES:-360}
+      # Max length of a single recording (minutes) — a capture auto-stops at this cap
+      - RECORDING_MAX_MINUTES=${RECORDING_MAX_MINUTES:-180}
+      # Comma-separated domains/origins allowed to call the API cross-origin.
+      # Empty = allow any (the app is same-origin, so this is a hardening option).
+      - CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS:-}
+      # Authentication — auth is ON when AUTH_PASSWORD is set, OFF (open) when empty.
+      - AUTH_USERNAME=${AUTH_USERNAME:-admin}
+      - AUTH_PASSWORD=${AUTH_PASSWORD:-}
+      - AUTH_SESSION_DAYS=${AUTH_SESSION_DAYS:-30}
+      - AUTH_SESSION_SECRET=${AUTH_SESSION_SECRET:-}
+      # Security tunables (read by the app at runtime).
+      - HSTS_MAX_AGE=${HSTS_MAX_AGE:-15552000}
+      - RATE_LIMIT_DISABLED=${RATE_LIMIT_DISABLED:-}
+      - RL_UPSTREAM_MAX=${RL_UPSTREAM_MAX:-120}
+      - RL_WRITE_MAX=${RL_WRITE_MAX:-120}
+      - RL_LOGIN_MAX=${RL_LOGIN_MAX:-10}
+    volumes:
+      - data:/data
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:56892/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  data:
+    driver: local
