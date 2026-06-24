@@ -520,6 +520,8 @@ export const useStore = create((set, get) => ({
         channelLogo: channel.logo,
         url: channel.url,
         title: programme?.title || channel.name,
+        httpUserAgent: channel.httpUserAgent || '',
+        httpReferrer: channel.httpReferrer || '',
       });
       set({ recordings: [...get().recordings.filter((r) => r.id !== saved.id), saved] });
       get().setToast('Recording started');

@@ -263,6 +263,18 @@ const FETCH_HEADERS = {
   Accept: '*/*',
 };
 
+// Some streams only respond to a specific User-Agent / Referer (carried in the
+// playlist via tvg attributes or #EXTVLCOPT). Sanitize caller-supplied values
+// (strip CR/LF to block header injection, cap length) before forwarding.
+function cleanHeader(v) {
+  return typeof v === 'string' ? v.replace(/[\r\n]/g, '').slice(0, 512) : '';
+}
+// Query suffix that carries the same UA/Referer onto rewritten manifest URLs so
+// nested playlists, keys and segments are fetched with the same headers.
+function proxyExtra(ua, ref) {
+  return (ua ? `&ua=${encodeURIComponent(ua)}` : '') + (ref ? `&ref=${encodeURIComponent(ref)}` : '');
+}
+
 function isValidUrl(u) {
   try {
     const url = new URL(u);
@@ -285,8 +297,12 @@ app.all('/api/proxy', async (req, res) => {
   if (!isValidUrl(target)) {
     return res.status(400).json({ error: 'Invalid or missing url parameter' });
   }
+  const ua = cleanHeader(req.query.ua);
+  const ref = cleanHeader(req.query.ref);
   try {
     const headers = { ...FETCH_HEADERS };
+    if (ua) headers['User-Agent'] = ua;
+    if (ref) headers.Referer = ref;
     if (req.headers.range) headers.Range = req.headers.range;
 
     const upstream = await fetch(target, {
@@ -307,7 +323,7 @@ app.all('/api/proxy', async (req, res) => {
     // Rewrite HLS manifests so nested segment/playlist URLs also flow through the proxy.
     if (/mpegurl|m3u8/i.test(contentType) || /\.m3u8(\?|$)/i.test(target)) {
       const text = await upstream.text();
-      const rewritten = rewriteManifest(text, target);
+      const rewritten = rewriteManifest(text, target, proxyExtra(ua, ref));
       res.setHeader('content-type', 'application/vnd.apple.mpegurl');
       res.removeHeader('content-length');
       return res.send(rewritten);
@@ -328,11 +344,12 @@ app.all('/api/proxy', async (req, res) => {
   }
 });
 
-function rewriteManifest(text, manifestUrl) {
+function rewriteManifest(text, manifestUrl, extra = '') {
   const base = new URL(manifestUrl);
   // Relative proxy URL: the browser resolves it against the manifest's own URL,
   // so it inherits the page scheme (https) — no mixed content behind a TLS proxy,
   // and no dependency on req.protocol (which is http inside the container).
+  // `extra` re-attaches the UA/Referer so segments inherit the same headers.
   const proxyBase = `/api/proxy?url=`;
   return text
     .split('\n')
@@ -342,11 +359,11 @@ function rewriteManifest(text, manifestUrl) {
         // Rewrite URI="..." inside tags (keys, media, etc.)
         return line.replace(/URI="([^"]+)"/g, (full, uri) => {
           const abs = new URL(uri, base).toString();
-          return `URI="${proxyBase}${encodeURIComponent(abs)}"`;
+          return `URI="${proxyBase}${encodeURIComponent(abs)}${extra}"`;
         });
       }
       const abs = new URL(trimmed, base).toString();
-      return proxyBase + encodeURIComponent(abs);
+      return proxyBase + encodeURIComponent(abs) + extra;
     })
     .join('\n');
 }
@@ -551,6 +568,8 @@ app.post('/api/recordings/start', writeLimiter, async (req, res) => {
     channelLogo: b.channelLogo || '',
     url: b.url,
     title: b.title || b.channelName || 'Recording',
+    httpUserAgent: cleanHeader(b.httpUserAgent),
+    httpReferrer: cleanHeader(b.httpReferrer),
     start: new Date().toISOString(),
     end: new Date(Date.now() + RECORDING_MAX_MINUTES * 60000).toISOString(),
     status: 'recording',
@@ -563,7 +582,14 @@ app.post('/api/recordings/start', writeLimiter, async (req, res) => {
       list.push(rec);
       return list;
     });
-    startCapture({ rec, dataDir: DATA_DIR, maxMinutes: RECORDING_MAX_MINUTES, userAgent: FETCH_HEADERS['User-Agent'], onFinish: onCaptureFinish });
+    startCapture({
+      rec,
+      dataDir: DATA_DIR,
+      maxMinutes: RECORDING_MAX_MINUTES,
+      userAgent: rec.httpUserAgent || FETCH_HEADERS['User-Agent'],
+      referer: rec.httpReferrer,
+      onFinish: onCaptureFinish,
+    });
     res.json(rec);
   } catch (err) {
     res.status(500).json({ error: 'Failed to start recording', detail: String(err) });
@@ -588,6 +614,8 @@ app.post('/api/recordings', writeLimiter, async (req, res) => {
       channelLogo: body.channelLogo || '',
       url: body.url || '',
       title: body.title || body.channelName || 'Recording',
+      httpUserAgent: cleanHeader(body.httpUserAgent),
+      httpReferrer: cleanHeader(body.httpReferrer),
       start: body.start || new Date().toISOString(),
       end: body.end || new Date(Date.now() + 3600_000).toISOString(),
       status: body.status || 'scheduled',
@@ -722,7 +750,14 @@ async function tickScheduler() {
     if (start <= now && now < end && !isRecording(r.id)) {
       const mins = Math.min(RECORDING_MAX_MINUTES, Math.max(1, Math.ceil((end - now) / 60000)));
       await updateRecording(r.id, { status: 'recording', filename: fileNameFor(r.id), start: new Date().toISOString() });
-      startCapture({ rec: r, dataDir: DATA_DIR, maxMinutes: mins, userAgent: FETCH_HEADERS['User-Agent'], onFinish: onCaptureFinish });
+      startCapture({
+        rec: r,
+        dataDir: DATA_DIR,
+        maxMinutes: mins,
+        userAgent: r.httpUserAgent || FETCH_HEADERS['User-Agent'],
+        referer: r.httpReferrer,
+        onFinish: onCaptureFinish,
+      });
     }
   }
 }

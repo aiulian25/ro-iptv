@@ -47,7 +47,7 @@ export async function currentSize(id) {
  * Spawn an ffmpeg capture. Calls onFinish(patch) when the process exits
  * (cleanly via -t / graceful stop, or on error).
  */
-export function startCapture({ rec, dataDir, maxMinutes, userAgent, onFinish }) {
+export function startCapture({ rec, dataDir, maxMinutes, userAgent, referer, onFinish }) {
   const dir = recordingsDir(dataDir);
   mkdirSync(dir, { recursive: true });
   const filename = fileNameFor(rec.id);
@@ -60,6 +60,8 @@ export function startCapture({ rec, dataDir, maxMinutes, userAgent, onFinish }) 
     '-y',
     '-user_agent',
     userAgent || 'Mozilla/5.0 (RO-IPTV)',
+    // Forward a Referer for streams that require it (CRLF-terminated per ffmpeg).
+    ...(referer ? ['-headers', `Referer: ${referer}\r\n`] : []),
     '-i',
     rec.url,
     '-c',

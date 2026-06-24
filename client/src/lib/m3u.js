@@ -38,13 +38,27 @@ export function parseM3U(text = '') {
         tvgName: attrs['tvg-name'] || name,
         logo: attrs['tvg-logo'] || '',
         group: attrs['group-title'] || 'Uncategorized',
+        httpUserAgent: attrs['http-user-agent'] || '',
+        httpReferrer: attrs['http-referrer'] || '',
       };
     } else if (line.startsWith('#EXTGRP:')) {
       if (current) current.group = line.slice(8).trim() || current.group;
+    } else if (line.startsWith('#EXTVLCOPT:')) {
+      // Per-stream HTTP headers some streams require to play.
+      if (current) {
+        const opt = line.slice('#EXTVLCOPT:'.length);
+        const eq = opt.indexOf('=');
+        if (eq !== -1) {
+          const k = opt.slice(0, eq).trim().toLowerCase();
+          const v = opt.slice(eq + 1).trim();
+          if (k === 'http-user-agent') current.httpUserAgent = v;
+          else if (k === 'http-referrer') current.httpReferrer = v;
+        }
+      }
     } else if (line.startsWith('#')) {
       continue;
     } else {
-      const base = current || { name: `Channel ${idx + 1}`, tvgId: '', tvgName: '', logo: '', group: 'Uncategorized' };
+      const base = current || { name: `Channel ${idx + 1}`, tvgId: '', tvgName: '', logo: '', group: 'Uncategorized', httpUserAgent: '', httpReferrer: '' };
       channels.push({
         id: `${idx}-${base.tvgId || base.name}`.replace(/[^a-zA-Z0-9-_]/g, '_'),
         name: base.name,
@@ -54,6 +68,8 @@ export function parseM3U(text = '') {
         group: base.group,
         url: line,
         kind: guessKind(base.group, base.name, line),
+        httpUserAgent: base.httpUserAgent || '',
+        httpReferrer: base.httpReferrer || '',
       });
       idx += 1;
       current = null;

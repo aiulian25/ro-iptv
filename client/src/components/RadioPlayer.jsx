@@ -26,7 +26,7 @@ export default function RadioPlayer({ station, onPrev, onNext, onStop }) {
     const audio = audioRef.current;
     if (!audio || !station) return;
     setError(null);
-    const src = proxied(station.url);
+    const src = proxied(station.url, station.httpUserAgent, station.httpReferrer);
     const isHls = /\.m3u8(\?|$)/i.test(station.url || '');
 
     if (isHls && Hls.isSupported()) {

@@ -124,10 +124,15 @@ export function recordingDownloadUrl(id) {
   return `${BASE}/api/recordings/${id}/file?dl=1`;
 }
 
-// Wrap any stream URL through the backend CORS proxy.
-export function proxied(url) {
+// Wrap any stream URL through the backend CORS proxy. Optional per-channel
+// headers (User-Agent / Referer) are forwarded to the upstream — some streams
+// only respond when these are present.
+export function proxied(url, ua = '', referer = '') {
   if (!url) return url;
-  return `/api/proxy?url=${encodeURIComponent(url)}`;
+  let out = `/api/proxy?url=${encodeURIComponent(url)}`;
+  if (ua) out += `&ua=${encodeURIComponent(ua)}`;
+  if (referer) out += `&ref=${encodeURIComponent(referer)}`;
+  return out;
 }
 
 export default api;

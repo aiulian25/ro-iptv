@@ -40,7 +40,7 @@ export default function MiniPlayer() {
   useEffect(() => {
     const el = mediaRef.current;
     if (!el || !active || !currentChannel) return;
-    const src = proxied(currentChannel.url);
+    const src = proxied(currentChannel.url, currentChannel.httpUserAgent, currentChannel.httpReferrer);
     const isHls = /\.m3u8(\?|$)/i.test(currentChannel.url || '');
     if (isHls && Hls.isSupported()) {
       const hls = new Hls({ lowLatencyMode: true, enableWorker: true });

@@ -30,8 +30,9 @@ const VideoPlayer = forwardRef(function VideoPlayer({ channel, onPrev, onNext, o
     setLevels([]);
     setCurrentLevel(-1);
 
-    // Route through backend proxy to defeat CORS / mixed-content issues.
-    const src = proxied(channel.url);
+    // Route through backend proxy to defeat CORS / mixed-content issues, and
+    // forward any per-channel UA/Referer the stream requires.
+    const src = proxied(channel.url, channel.httpUserAgent, channel.httpReferrer);
 
     if (isHls && Hls.isSupported()) {
       const hls = new Hls({ lowLatencyMode: true, enableWorker: true, backBufferLength: 30 });
