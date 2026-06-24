@@ -1,4 +1,4 @@
-# RO-IPTV — build & local security scanning (Security.md §5)
+# RO-IPTV — build & local security scanning (§5)
 # Each scanner is optional: if a tool isn't installed the step is skipped with a
 # hint instead of failing, so `make scan` works on any machine.
 

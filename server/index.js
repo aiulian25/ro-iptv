@@ -43,7 +43,7 @@ const app = express();
 app.disable('x-powered-by');
 app.set('trust proxy', true); // honor X-Forwarded-* from a reverse proxy
 
-// ---- Security headers (Security.md §4) -----------------------------------
+// ---- Security headers (§4) -----------------------------------
 // CSP is tuned to this app: scripts are external-only (no inline JS), but React
 // style props need inline styles, and logos/media come from arbitrary IPTV
 // origins. Cross-origin isolation is OFF because the app embeds cross-origin
@@ -97,7 +97,7 @@ app.use((req, res, next) => {
   next();
 });
 
-// ---- Rate limiting (Security.md §4) --------------------------------------
+// ---- Rate limiting (§4) --------------------------------------
 // Applied ONLY to abuse-prone endpoints: upstream fetches (playlist/EPG/parse)
 // and writes. Playback (/api/proxy), media streaming, health and polled list
 // GETs are intentionally UNLIMITED so streaming and live UI updates are never
@@ -165,7 +165,7 @@ app.use(compression());
 app.use(express.json({ limit: '25mb' }));
 app.use(express.text({ type: ['text/plain', 'application/x-mpegurl', 'audio/x-mpegurl'], limit: '25mb' }));
 
-// ---- Authentication (Security.md §4) -------------------------------------
+// ---- Authentication (§4) -------------------------------------
 // Cookie options. Secure is set dynamically: ON over HTTPS (honored via
 // `trust proxy` → X-Forwarded-Proto), OFF over plain HTTP so login still works
 // on a LAN address. SameSite=Lax + the CORS allowlist defend against CSRF.

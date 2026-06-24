@@ -150,9 +150,8 @@ The image and app are hardened out of the box — non-root, read-only root
 filesystem, all Linux capabilities dropped, `no-new-privileges`, resource/PID
 limits, npm removed, OS packages patched on build, plus a tuned CSP, HSTS,
 `Permissions-Policy`, API rate limiting and upload sanitization. See
-[`Security.md`](Security.md) for the full checklist and
 [`docs/SECURITY-DEPLOYMENT.md`](docs/SECURITY-DEPLOYMENT.md) for **reverse-proxy,
-TLS, firewall and Docker-network** guidance (Security.md §3).
+TLS, firewall and Docker-network** hardening guidance.
 
 Optional hardening variables (see [`.env.example`](.env.example)):
 
@@ -211,7 +210,6 @@ their CORS headers.
 ├── Dockerfile              # multi-stage: build client → hardened Express runtime
 ├── docker-compose.yml      # runtime hardening (read-only FS, dropped caps, limits)
 ├── Makefile                # build + `make scan` (Trivy/Grype/hadolint/SBOM)
-├── Security.md             # security checklist
 └── .env.example
 ```
 

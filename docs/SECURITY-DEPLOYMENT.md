@@ -1,9 +1,9 @@
 # RO-IPTV — Deployment & Network Security
 
-Companion to [`Security.md`](../Security.md). It covers **§3 Network and exposure
-controls** — the parts that live **outside** the container image (reverse proxy,
-host firewall, Docker networking, orchestrator) and therefore can't be "shipped"
-in the repo, only configured by whoever deploys it.
+This guide covers **network and exposure controls** — the parts that live
+**outside** the container image (reverse proxy, host firewall, Docker networking,
+orchestrator) and therefore can't be "shipped" in the repo, only configured by
+whoever deploys it.
 
 > What's already enforced **in-repo** (so you don't have to): the image runs
 > non-root, read-only root FS, all Linux capabilities dropped, `no-new-privileges`,
@@ -20,7 +20,7 @@ about — there is exactly one thing to put behind a front door.
 
 ## 1. Port exposure — publish only what you need
 
-Security.md §3: *"Only publish the ports you actually need; avoid mapping
+Principle (§3): *"Only publish the ports you actually need; avoid mapping
 privileged ports and double-check `-p`/`--publish`."*
 
 The compose file publishes a single, **unprivileged** port:
@@ -59,7 +59,7 @@ let it forward to 56892.
 
 ## 2. A reverse proxy / API gateway as the front door
 
-Security.md §3: *"Use API gateways as a front door, with TLS termination, rate
+Principle (§3): *"Use API gateways as a front door, with TLS termination, rate
 limiting, and request filtering."*
 
 Put RO-IPTV behind a reverse proxy that does **TLS termination, HTTP→HTTPS
@@ -147,7 +147,7 @@ your real hostnames (already done via `.env`).
 
 ## 3. Inter-container communication & segmentation
 
-Security.md §3: *"Disable inter-container communication by default and use
+Principle (§3): *"Disable inter-container communication by default and use
 explicit network policies or segmentation."*
 
 RO-IPTV ships on the **default compose network** for simplicity. To segment it
@@ -188,7 +188,7 @@ networks:
 
 ## 4. TLS strength & certificate validation
 
-Security.md §3: *"Encrypt all external traffic with strong TLS and up-to-date
+Principle (§3): *"Encrypt all external traffic with strong TLS and up-to-date
 ciphers; pin or validate certificates between internal services where practical."*
 
 - **External:** TLS 1.2+ (prefer 1.3), managed certs (Let's Encrypt). The app
@@ -209,7 +209,7 @@ ciphers; pin or validate certificates between internal services where practical.
 
 ## 5. If you run an orchestrator (Swarm / Kubernetes)
 
-Security.md §3: *"encrypt overlay networks and segregate management plane from
+Principle (§3): *"encrypt overlay networks and segregate management plane from
 data plane."* Only relevant if you move off plain `docker compose`:
 
 - **Docker Swarm:** create overlay networks with `--opt encrypted`; store
@@ -238,7 +238,6 @@ data plane."* Only relevant if you move off plain `docker compose`:
 
 ---
 
-*See also: [`Security.md`](../Security.md) (full checklist), the in-repo
-hardening in [`../Dockerfile`](../Dockerfile) and
+*See also: the in-repo hardening in [`../Dockerfile`](../Dockerfile) and
 [`../docker-compose.yml`](../docker-compose.yml), and the `make scan` target in
 [`../Makefile`](../Makefile).*

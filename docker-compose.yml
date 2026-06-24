@@ -7,7 +7,7 @@ services:
     container_name: ro-iptv
     restart: unless-stopped
 
-    # ---- Runtime hardening (Security.md §2) --------------------------------
+    # ---- Runtime hardening (§2) --------------------------------
     # Proper PID 1: forwards signals and reaps ffmpeg children (no zombies).
     init: true
     # Block privilege escalation and drop ALL Linux capabilities — the app binds

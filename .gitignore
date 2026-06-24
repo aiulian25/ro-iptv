@@ -6,3 +6,4 @@ data/
 .DS_Store
 client/dev-dist/
 sbom.spdx.json
+Security.md
