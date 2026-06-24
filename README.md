@@ -116,7 +116,16 @@ npm run build && npm start    # http://localhost:56892
 > Authentication and security-hardening variables are documented in their own
 > sections below ([Authentication](#-authentication), [Security](#-security)).
 
-All of these are also editable at runtime from the in-app **Settings** dialog.
+**Set these via environment variables** (e.g. `-e VAR=value` on `docker run`, or
+the `environment:` block in Compose). For a full, commented reference of every
+option — including authentication and hardening — copy the sample file and edit it:
+
+```bash
+cp .env.example .env     # then set your values and pass it to the container
+```
+
+The playlist/EPG/refresh options are also editable at runtime from the in-app
+**Settings** dialog.
 
 ---
 
@@ -149,9 +158,8 @@ HTTPS). **Lost the password?** Delete the `credential` entry from
 The image and app are hardened out of the box — non-root, read-only root
 filesystem, all Linux capabilities dropped, `no-new-privileges`, resource/PID
 limits, npm removed, OS packages patched on build, plus a tuned CSP, HSTS,
-`Permissions-Policy`, API rate limiting and upload sanitization. See
-[`docs/SECURITY-DEPLOYMENT.md`](docs/SECURITY-DEPLOYMENT.md) for **reverse-proxy,
-TLS, firewall and Docker-network** hardening guidance.
+`Permissions-Policy`, API rate limiting and upload sanitization. Behind a reverse
+proxy, terminate TLS at the proxy and forward to port 56892.
 
 Optional hardening variables (see [`.env.example`](.env.example)):
 
@@ -205,8 +213,6 @@ their CORS headers.
 │   └── public/             # manifest icons, favicon, offline page
 ├── server/                 # Express API + static host
 │   └── lib/                # auth, m3u, epg, ffmpeg recorder, json store
-├── docs/
-│   └── SECURITY-DEPLOYMENT.md   # reverse-proxy / TLS / network hardening (§3)
 ├── Dockerfile              # multi-stage: build client → hardened Express runtime
 ├── docker-compose.yml      # runtime hardening (read-only FS, dropped caps, limits)
 ├── Makefile                # build + `make scan` (Trivy/Grype/hadolint/SBOM)
