@@ -1,7 +1,14 @@
+import { useState } from 'react';
 import { useStore, epgSources } from '../store/useStore';
-import { programmesForChannel, findNowNext, fmtTime, progressPct } from '../lib/epg';
+import { programmesForChannel, findNowNext, fmtTime, progressPct, epgIconFor } from '../lib/epg';
 import ChannelLogo from './ChannelLogo';
+import ProgrammeModal from './ProgrammeModal';
+import EpgLinkButton from './EpgLinkButton';
 import Icon from './Icon';
+
+const PAGE = 60;
+const MS_PER_MINUTE = 60000;
+const DEFAULT_PADDING = { before: 1, after: 5 };
 
 // Scrollable per-channel programme guide with Now/Next + record markers.
 export default function EpgGuide({ channels, onSelect }) {
@@ -10,6 +17,10 @@ export default function EpgGuide({ channels, onSelect }) {
   const sources = useStore((s) => epgSources(s.settings));
   const scheduleRecording = useStore((s) => s.scheduleRecording);
   const recordings = useStore((s) => s.recordings);
+  const overrides = useStore((s) => s.settings.epgOverrides || {});
+  const pad = useStore((s) => s.settings.recordingPadding) || DEFAULT_PADDING;
+  const [limit, setLimit] = useState(PAGE);
+  const [selected, setSelected] = useState(null);
 
   if (!epg) {
     return (
@@ -34,8 +45,8 @@ export default function EpgGuide({ channels, onSelect }) {
 
   return (
     <div className="flex flex-col gap-4">
-      {channels.slice(0, 60).map((c) => {
-        const progs = programmesForChannel(epg, c);
+      {channels.slice(0, limit).map((c) => {
+        const progs = programmesForChannel(epg, c, overrides);
         const { now } = findNowNext(progs);
         const upcoming = progs
           .filter((p) => p.stop && new Date(p.stop) > new Date())
@@ -43,7 +54,7 @@ export default function EpgGuide({ channels, onSelect }) {
         return (
           <div key={c.id} className="glass rounded-xl p-3">
             <div className="flex items-center gap-3 mb-2 cursor-pointer" onClick={() => onSelect(c)}>
-              <ChannelLogo src={c.logo} kind={c.kind} className="w-12 h-9" />
+              <ChannelLogo src={c.logo || epgIconFor(epg, c)} kind={c.kind} className="w-12 h-9" />
               <div className="min-w-0">
                 <h3 className="font-semibold truncate">{c.name}</h3>
                 {now && (
@@ -53,15 +64,16 @@ export default function EpgGuide({ channels, onSelect }) {
                 )}
               </div>
             </div>
-            <div className="flex gap-2 overflow-x-auto no-scrollbar pb-1">
-              {upcoming.length ? (
-                upcoming.map((p, i) => {
+            {upcoming.length ? (
+              <div className="flex gap-2 overflow-x-auto no-scrollbar pb-1">
+                {upcoming.map((p, i) => {
                   const isNow = now && p.start === now.start;
                   const isRec = recordings.some((r) => r.channelName === c.name && r.title === p.title);
                   return (
                     <div
                       key={i}
-                      className={`shrink-0 w-44 rounded-lg p-2.5 border ${
+                      onClick={() => setSelected(p)}
+                      className={`shrink-0 w-44 rounded-lg p-2.5 border cursor-pointer transition-colors hover:border-white/30 ${
                         isNow ? 'border-primary bg-primary/10' : 'border-white/10 bg-white/5'
                       }`}
                     >
@@ -70,17 +82,18 @@ export default function EpgGuide({ channels, onSelect }) {
                           {fmtTime(p.start)}–{fmtTime(p.stop)}
                         </span>
                         <button
-                          onClick={() =>
+                          onClick={(e) => {
+                            e.stopPropagation();
                             scheduleRecording({
                               channelId: c.id,
                               channelName: c.name,
                               channelLogo: c.logo,
                               url: c.url,
                               title: p.title,
-                              start: p.start,
-                              end: p.stop,
-                            })
-                          }
+                              start: new Date(new Date(p.start).getTime() - pad.before * MS_PER_MINUTE).toISOString(),
+                              end: new Date(new Date(p.stop).getTime() + pad.after * MS_PER_MINUTE).toISOString(),
+                            });
+                          }}
                           className={isRec ? 'text-error' : 'text-on-surface-variant hover:text-error'}
                           title="Schedule recording"
                         >
@@ -90,14 +103,26 @@ export default function EpgGuide({ channels, onSelect }) {
                       <p className="text-sm font-medium mt-1 line-clamp-2">{p.title}</p>
                     </div>
                   );
-                })
-              ) : (
-                <p className="text-sm text-on-surface-variant py-2">No schedule for this channel.</p>
-              )}
-            </div>
+                })}
+              </div>
+            ) : (
+              <div className="flex items-center gap-3 flex-wrap py-2">
+                <p className="text-sm text-on-surface-variant">No schedule for this channel.</p>
+                <EpgLinkButton channel={c} />
+              </div>
+            )}
           </div>
         );
       })}
+      {limit < channels.length && (
+        <button
+          onClick={() => setLimit((l) => l + PAGE)}
+          className="glass rounded-xl py-3 text-sm text-on-surface-variant hover:text-on-surface hover:bg-white/5 transition-colors"
+        >
+          Show more ({limit}/{channels.length})
+        </button>
+      )}
+      <ProgrammeModal programme={selected} onClose={() => setSelected(null)} />
     </div>
   );
 }

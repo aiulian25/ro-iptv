@@ -96,6 +96,7 @@ npm run build && npm start    # http://localhost:56892
 | `EPG_URL`                  | _empty_             | Optional XMLTV EPG URL for the guide & Now/Next.       |
 | `REFRESH_INTERVAL_MINUTES` | `360`               | Active-playlist auto-refresh interval (`0` disables).  |
 | `RECORDING_MAX_MINUTES`    | `180`               | Hard cap on a single recording's length.               |
+| `RECORDINGS_MAX_GB`        | _empty_             | Optional total-storage cap; prunes oldest finished.    |
 | `DATA_DIR`                 | `/data`             | Where playlists, recordings & auth data are persisted. |
 
 > Authentication and security-hardening variables are documented in their own
@@ -155,6 +156,7 @@ Optional hardening variables (see [`.env.example`](.env.example)):
 | `RATE_LIMIT_DISABLED`   | _empty_     | Set `1` to turn off API rate limiting entirely.         |
 | `RL_UPSTREAM_MAX`       | `120`       | Max upstream-fetch requests/min/IP (playlist/EPG/parse).|
 | `RL_WRITE_MAX`          | `120`       | Max write requests/min/IP (playlist/recording changes). |
+| `PROXY_BLOCK_PRIVATE`   | _empty_     | Set `1` to refuse proxy/playlist/EPG fetches to private/loopback addresses (SSRF hardening). Leave blank for LAN sources. |
 | `MEM_LIMIT` / `CPU_LIMIT` / `PIDS_LIMIT` | `1024m` / `2` / `256` | Container resource ceilings (compose). |
 
 Run the image vulnerability scan suite (Trivy, Grype, hadolint, syft SBOM) with

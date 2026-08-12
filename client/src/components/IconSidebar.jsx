@@ -1,7 +1,7 @@
 import { useStore } from '../store/useStore';
 import Icon from './Icon';
 
-const ITEMS = [
+export const ITEMS = [
   { id: 'countries', icon: 'public', label: 'Countries' },
   { id: 'channels', icon: 'list_alt', label: 'Channels' },
   { id: 'favourites', icon: 'star', label: 'Favourites' },

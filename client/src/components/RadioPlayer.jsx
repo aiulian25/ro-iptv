@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
-import Hls from 'hls.js';
 import Icon from './Icon';
-import { proxied } from '../lib/api';
+import { attachStream } from '../lib/playSource';
 import ChannelLogo from './ChannelLogo';
 import FavouriteButton from './FavouriteButton';
 import { useMediaSession } from '../hooks/useMediaSession';
@@ -26,27 +25,17 @@ export default function RadioPlayer({ station, onPrev, onNext, onStop }) {
     const audio = audioRef.current;
     if (!audio || !station) return;
     setError(null);
-    const src = proxied(station.url, station.httpUserAgent, station.httpReferrer);
-    const isHls = /\.m3u8(\?|$)/i.test(station.url || '');
-
-    if (isHls && Hls.isSupported()) {
-      const hls = new Hls();
-      hlsRef.current = hls;
-      hls.loadSource(src);
-      hls.attachMedia(audio);
-      hls.on(Hls.Events.ERROR, (_e, d) => d.fatal && setError('Stream unavailable'));
-    } else {
-      audio.src = src;
-      audio.onerror = () => setError('Stream unavailable');
-    }
     audio.volume = volume;
-    audio.play().catch(() => {});
+    const isHls = /\.m3u8(\?|$)/i.test(station.url || '');
+    const stop = attachStream(audio, station, {
+      hlsRef,
+      isHls,
+      onManifest: () => audio.play().catch(() => {}),
+      onError: () => setError('Stream unavailable'),
+    });
 
     return () => {
-      if (hlsRef.current) {
-        hlsRef.current.destroy();
-        hlsRef.current = null;
-      }
+      stop();
       audio.removeAttribute('src');
       audio.load?.();
     };

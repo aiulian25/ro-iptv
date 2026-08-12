@@ -22,6 +22,7 @@ export default function App() {
   const init = useStore((s) => s.init);
   const restoreLastChannel = useStore((s) => s.restoreLastChannel);
   const refreshAllPlaylists = useStore((s) => s.refreshAllPlaylists);
+  const loadEpg = useStore((s) => s.loadEpg);
   const refreshIntervalMinutes = useStore((s) => s.settings.refreshIntervalMinutes);
   const currentChannel = useStore((s) => s.currentChannel);
 
@@ -47,12 +48,16 @@ export default function App() {
     if (!currentChannel) clearNowPlaying();
   }, [currentChannel]);
 
-  // Background auto-refresh of all URL playlists.
+  // Background auto-refresh of all URL playlists and the EPG guide (same cadence,
+  // so Now/Next doesn't go stale during a long session).
   useEffect(() => {
     if (!refreshIntervalMinutes) return;
-    const id = setInterval(() => refreshAllPlaylists(), refreshIntervalMinutes * 60 * 1000);
+    const id = setInterval(() => {
+      refreshAllPlaylists();
+      loadEpg();
+    }, refreshIntervalMinutes * 60 * 1000);
     return () => clearInterval(id);
-  }, [refreshIntervalMinutes, refreshAllPlaylists]);
+  }, [refreshIntervalMinutes, refreshAllPlaylists, loadEpg]);
 
   // While we don't yet know the auth state, show a minimal splash (avoids a
   // flash of either the app or the login screen).

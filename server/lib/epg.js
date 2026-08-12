@@ -29,8 +29,14 @@ function textOf(node) {
   return String(node);
 }
 
+// XMLTV <icon> may be a single node or an array; return the first src (or '').
+function iconSrc(node) {
+  const first = Array.isArray(node) ? node[0] : node;
+  return first?.['@_src'] || '';
+}
+
 /**
- * Parse XMLTV text into { channels: {id: displayName}, programmes: {channelId: [{...}]} }
+ * Parse XMLTV text into { channels: {id: {name, icon}}, programmes: {channelId: [{...}]} }
  */
 export function parseEPG(xml = '') {
   const doc = parser.parse(xml);
@@ -42,7 +48,7 @@ export function parseEPG(xml = '') {
   for (const c of chanList) {
     const id = c['@_id'];
     if (!id) continue;
-    channels[id] = textOf(c['display-name']);
+    channels[id] = { name: textOf(c['display-name']), icon: iconSrc(c.icon) };
   }
 
   const progList = Array.isArray(tv.programme) ? tv.programme : tv.programme ? [tv.programme] : [];
@@ -51,8 +57,13 @@ export function parseEPG(xml = '') {
     if (!channelId) continue;
     const entry = {
       title: textOf(p.title),
+      subTitle: textOf(p['sub-title']),
       desc: textOf(p.desc),
       category: textOf(p.category),
+      episode: textOf(p['episode-num']),
+      date: textOf(p.date),
+      rating: textOf(p.rating?.value),
+      icon: iconSrc(p.icon),
       start: parseXmltvDate(p['@_start']),
       stop: parseXmltvDate(p['@_stop']),
     };

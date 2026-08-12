@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { useStore } from '../store/useStore';
 import Icon from '../components/Icon';
 import ChannelLogo from '../components/ChannelLogo';
-import { recordingFileUrl, recordingDownloadUrl } from '../lib/api';
+import { api, recordingFileUrl, recordingDownloadUrl } from '../lib/api';
 
 function fmt(iso) {
   if (!iso) return '—';
@@ -27,6 +27,7 @@ const STATUS = {
   scheduled: { label: 'Scheduled', color: 'text-primary' },
   completed: { label: 'Saved', color: 'text-on-surface-variant' },
   interrupted: { label: 'Interrupted', color: 'text-secondary' },
+  missed: { label: 'Missed', color: 'text-on-surface-variant' },
   failed: { label: 'Failed', color: 'text-error' },
 };
 
@@ -36,26 +37,44 @@ export default function RecordingsView() {
   const stopRecording = useStore((s) => s.stopRecording);
   const loadRecordings = useStore((s) => s.loadRecordings);
   const [watching, setWatching] = useState(null);
+  const [storage, setStorage] = useState(null);
 
   const hasActive = recordings.some((r) => r.status === 'recording');
+
+  const loadStorage = () => api.storage().then(setStorage).catch(() => {});
 
   // Refresh on mount, then poll only while a capture is in progress (live size).
   useEffect(() => {
     loadRecordings();
+    loadStorage();
   }, [loadRecordings]);
   useEffect(() => {
     if (!hasActive) return;
-    const id = setInterval(loadRecordings, 4000);
+    const id = setInterval(() => {
+      loadRecordings();
+      loadStorage();
+    }, 4000);
     return () => clearInterval(id);
   }, [hasActive, loadRecordings]);
 
   const sorted = [...recordings].sort((a, b) => new Date(b.start) - new Date(a.start));
+
+  const storageSegments = storage
+    ? [
+        `${formatBytes(storage.recordingsBytes)} used`,
+        storage.diskFreeBytes != null ? `${formatBytes(storage.diskFreeBytes)} free` : null,
+        storage.maxBytes ? `cap ${formatBytes(storage.maxBytes)}` : null,
+      ].filter(Boolean)
+    : [];
 
   return (
     <div className="md:ml-20 pt-24 md:pt-28 px-4 md:px-8 pb-8 min-h-screen">
       <div className="mb-6">
         <h1 className="text-2xl md:text-3xl font-semibold">Recordings</h1>
         <p className="text-on-surface-variant">{recordings.length} recordings</p>
+        {storageSegments.length > 0 && (
+          <p className="text-on-surface-variant text-sm">{storageSegments.join(' · ')}</p>
+        )}
       </div>
 
       {sorted.length === 0 ? (

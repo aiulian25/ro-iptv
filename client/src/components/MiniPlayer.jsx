@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import Hls from 'hls.js';
 import { useStore } from '../store/useStore';
-import { proxied } from '../lib/api';
+import { attachStream } from '../lib/playSource';
 import { useMediaSession } from '../hooks/useMediaSession';
 import { useFloatingBox } from '../hooks/useFloatingBox';
 import Icon from './Icon';
@@ -40,26 +40,18 @@ export default function MiniPlayer() {
   useEffect(() => {
     const el = mediaRef.current;
     if (!el || !active || !currentChannel) return;
-    const src = proxied(currentChannel.url, currentChannel.httpUserAgent, currentChannel.httpReferrer);
     const isHls = /\.m3u8(\?|$)/i.test(currentChannel.url || '');
-    if (isHls && Hls.isSupported()) {
-      const hls = new Hls({ lowLatencyMode: true, enableWorker: true });
-      hlsRef.current = hls;
-      hls.loadSource(src);
-      hls.attachMedia(el);
-      hls.on(Hls.Events.MANIFEST_PARSED, () => el.play().catch(() => {}));
-      hls.on(Hls.Events.ERROR, (_e, d) => {
-        if (d.fatal && d.type === Hls.ErrorTypes.NETWORK_ERROR) hls.startLoad();
-      });
-    } else {
-      el.src = src;
-      el.play().catch(() => {});
-    }
+    const stop = attachStream(el, currentChannel, {
+      hlsRef,
+      isHls,
+      hlsConfig: { lowLatencyMode: true, enableWorker: true },
+      onManifest: () => el.play().catch(() => {}),
+      onError: (d) => {
+        if (d.type === Hls.ErrorTypes.NETWORK_ERROR) hlsRef.current?.startLoad();
+      },
+    });
     return () => {
-      if (hlsRef.current) {
-        hlsRef.current.destroy();
-        hlsRef.current = null;
-      }
+      stop();
       el.removeAttribute('src');
       el.load?.();
     };

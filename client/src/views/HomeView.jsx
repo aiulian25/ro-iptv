@@ -1,6 +1,7 @@
-import { useStore } from '../store/useStore';
+import { useStore, loadLastChannel } from '../store/useStore';
 import { useWeather } from '../hooks/useWeather';
 import { useClock } from '../hooks/useClock';
+import { programmesForChannel, findNowNext } from '../lib/epg';
 import Icon from '../components/Icon';
 
 function timeAgo(iso) {
@@ -21,6 +22,9 @@ export default function HomeView() {
   const playlists = useStore((s) => s.playlists);
   const currentChannel = useStore((s) => s.currentChannel);
   const setView = useStore((s) => s.setView);
+  const playChannel = useStore((s) => s.playChannel);
+  const epg = useStore((s) => s.epg);
+  const epgOverrides = useStore((s) => s.settings.epgOverrides || {});
   const weather = useWeather();
   const now = useClock();
 
@@ -31,9 +35,22 @@ export default function HomeView() {
   const count = (kind) => channels.filter((c) => c.kind === kind).length;
 
   const cards = [
-    { id: 'live', view: 'live', icon: 'live_tv', title: "Live TV's", sub: count('live') ? `${count('live')} Channels` : '+5000 Channels' },
-    { id: 'radio', view: 'radio', icon: 'radio', title: 'Radios', sub: count('radio') ? `${count('radio')} Stations` : '+500 Stations' },
+    { id: 'live', view: 'live', icon: 'live_tv', title: "Live TV's", sub: count('live') ? `${count('live')} Channels` : 'Add a playlist in Settings' },
+    { id: 'radio', view: 'radio', icon: 'radio', title: 'Radios', sub: count('radio') ? `${count('radio')} Stations` : 'Add a playlist in Settings' },
   ];
+
+  // Resume target: what's playing now, else the persisted last-played channel.
+  const last = currentChannel || loadLastChannel();
+  if (last) {
+    const nowTitle = findNowNext(programmesForChannel(epg, last, epgOverrides)).now?.title;
+    cards.push({
+      id: 'continue',
+      view: last.kind === 'radio' ? 'radio' : 'live',
+      icon: 'resume',
+      title: last.name,
+      sub: nowTitle || 'Continue watching',
+    });
+  }
 
   const time = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
   const date = now.toLocaleDateString(undefined, { weekday: 'long', month: 'short', day: 'numeric' });
@@ -50,12 +67,18 @@ export default function HomeView() {
       <div className="flex-1 flex items-center">
         <div className="flex items-center gap-5 md:gap-7 overflow-x-auto no-scrollbar w-full py-4 -mx-1 px-1">
           {cards.map((card, i) => {
-            const isActive = i === 0;
-            const isPlaying = currentChannel && (card.id === 'live' || (card.id === 'radio' && currentChannel.kind === 'radio'));
+            const isActive = last ? card.id === 'continue' : i === 0;
+            const isPlaying =
+              currentChannel &&
+              ((card.id === 'live' && currentChannel.kind !== 'radio') ||
+                (card.id === 'radio' && currentChannel.kind === 'radio'));
             return (
               <button
                 key={card.id}
-                onClick={() => setView(card.view)}
+                onClick={() => {
+                  if (card.id === 'continue') playChannel(last);
+                  setView(card.view);
+                }}
                 className={`group shrink-0 w-[230px] md:w-[260px] rounded-2xl flex flex-col text-left p-7 md:p-8 transition-all duration-300 hover:scale-[1.04] ${
                   isActive
                     ? 'card-gradient border-b-4 border-white/90 h-[440px] md:h-[460px] scale-[1.03]'
@@ -77,8 +100,8 @@ export default function HomeView() {
                   name={card.icon}
                   className="text-[64px] text-white mb-4 group-hover:scale-110 transition-transform origin-left"
                 />
-                <h2 className="text-3xl font-semibold">{card.title}</h2>
-                <p className="text-lg text-on-surface-variant">{card.sub}</p>
+                <h2 className="text-3xl font-semibold truncate">{card.title}</h2>
+                <p className="text-lg text-on-surface-variant truncate">{card.sub}</p>
               </button>
             );
           })}

@@ -1,8 +1,9 @@
 import { create } from 'zustand';
 import { api, setUnauthorizedHandler } from '../lib/api';
-import { parseM3U, guessKind } from '../lib/m3u';
+import { parseM3U, effectiveKind, channelId } from '../lib/m3u';
 import { uid } from '../lib/uid';
 import { channelCountry, channelCategories, countryName } from '../lib/country';
+import { catchupUrl } from '../lib/catchup';
 
 // Configured EPG source URLs (migrates the legacy single `epgUrl`).
 export function epgSources(settings = {}) {
@@ -42,7 +43,25 @@ const LS = {
   lastChannel: 'ro-iptv:lastChannel',
   activePlaylist: 'ro-iptv:activePlaylist',
   settings: 'ro-iptv:settings',
+  idv2: 'ro-iptv:idv2', // one-shot flag: channel ids migrated to content-derived v2
+  stateSync: 'ro-iptv:stateSync', // per-key last-applied updatedAt shadow for cross-device sync
 };
+
+// Cap a catchup window a minute short of now so we never request the still-airing tail.
+const CATCHUP_END_MARGIN_MS = 60_000;
+const HISTORY_CAP = 60;
+
+// Keys mirrored to the server for cross-device sync (favourites / history / settings).
+const SYNCED_STATE_KEYS = ['favourites', 'history', 'settings'];
+const STATE_PUSH_DEBOUNCE_MS = 2000;
+
+// Debounced push of a state key to the server, independently per key so a rapid
+// favourites toggle can't cancel a pending settings write (and vice versa).
+const statePushTimers = {};
+function pushState(key, value) {
+  clearTimeout(statePushTimers[key]);
+  statePushTimers[key] = setTimeout(() => api.saveState(key, value).catch(() => {}), STATE_PUSH_DEBOUNCE_MS);
+}
 
 function load(key, fallback) {
   try {
@@ -60,6 +79,11 @@ function save(key, value) {
   }
 }
 
+// Last-played channel as persisted by playChannel() (null on fresh profiles).
+export function loadLastChannel() {
+  return load(LS.lastChannel, null);
+}
+
 export const useStore = create((set, get) => ({
   // ---- data ----
   playlists: load(LS.playlists, []), // [{id,name,url,type,channelCount,updatedAt,enabled,contentKind}]
@@ -68,7 +92,7 @@ export const useStore = create((set, get) => ({
   favourites: load(LS.favourites, []), // [channelId]
   history: load(LS.history, []), // [{id,name,logo,url,kind,at}]
   recordings: [],
-  settings: load(LS.settings, { epgUrls: [], refreshIntervalMinutes: 360, defaultCountry: '' }),
+  settings: load(LS.settings, { epgUrls: [], refreshIntervalMinutes: 360, defaultCountry: '', recordingPadding: { before: 1, after: 5 } }),
   epgLoading: false,
 
   // ---- ui ----
@@ -179,6 +203,9 @@ export const useStore = create((set, get) => ({
       // Pull playlists from the server so any origin/device sharing this backend
       // rebuilds the same channels (localStorage is per-origin).
       await get()._hydratePlaylists();
+
+      // Same guarantee for favourites / history / settings.
+      await get()._syncState();
 
       // Auto-load a server-configured M3U_URL playlist on first run.
       const playlists = get().playlists;
@@ -301,10 +328,99 @@ export const useStore = create((set, get) => ({
     save(LS.playlists, merged);
   },
 
+  // Pull server-synced favourites/history/settings and merge into local. A per-key
+  // shadow of the last-applied updatedAt skips records we've already seen (incl. our
+  // own writes echoed back). Offline / no backend keeps local state untouched.
+  async _syncState() {
+    let records;
+    try {
+      records = await api.listState();
+    } catch {
+      return;
+    }
+    const shadow = load(LS.stateSync, {});
+    const nextShadow = { ...shadow };
+    for (const rec of records) {
+      if (!SYNCED_STATE_KEYS.includes(rec.key)) continue;
+      if (shadow[rec.key] && shadow[rec.key] >= rec.updatedAt) continue;
+      get()._applyStateRecord(rec, !shadow[rec.key]);
+      nextShadow[rec.key] = rec.updatedAt;
+    }
+    save(LS.stateSync, nextShadow);
+  },
+
+  // Merge one synced record into local state per its key's policy.
+  _applyStateRecord(rec, firstSync) {
+    if (rec.key === 'favourites') {
+      const server = Array.isArray(rec.value) ? rec.value : [];
+      // First-ever sync unions with local stars; afterwards the server wins.
+      const merged = firstSync ? [...new Set([...get().favourites, ...server])] : server;
+      set({ favourites: merged });
+      save(LS.favourites, merged);
+      if (firstSync && merged.length !== server.length) pushState('favourites', merged);
+      return;
+    }
+    if (rec.key === 'history') {
+      const server = Array.isArray(rec.value) ? rec.value : [];
+      const byId = new Map();
+      for (const h of [...server, ...get().history]) {
+        const existing = byId.get(h.id);
+        if (!existing || (h.at || 0) > (existing.at || 0)) byId.set(h.id, h);
+      }
+      const merged = [...byId.values()].sort((a, b) => (b.at || 0) - (a.at || 0)).slice(0, HISTORY_CAP);
+      set({ history: merged });
+      save(LS.history, merged);
+      return;
+    }
+    if (rec.key === 'settings') {
+      const server = rec.value && typeof rec.value === 'object' ? rec.value : {};
+      const merged = { ...get().settings, ...server };
+      // Re-run the epgUrls migration on the merged value (dedupe/trim, drop legacy epgUrl).
+      merged.epgUrls = [...new Set(epgSources(merged).map((u) => (u || '').trim()).filter(Boolean))];
+      delete merged.epgUrl;
+      set({ settings: merged });
+      save(LS.settings, merged);
+    }
+  },
+
+  // One-shot migration: legacy channel ids embedded the playlist index
+  // (`${idx}-name`), so any upstream reorder detached favourites/history. Rewrite
+  // cached channels to the content-derived v2 id and remap favourites/history.
+  // Covers both stale caches (legacy ids still stored) and refreshed caches
+  // (already v2 — the legacy id is recomputed from the index to find the mapping).
+  _migrateChannelIds() {
+    if (localStorage.getItem(LS.idv2)) return;
+    const idRemap = new Map();
+    for (const p of get().playlists) {
+      const cacheKey = `ro-iptv:channels:${p.id}`;
+      const chans = load(cacheKey, []) || [];
+      const seen = new Map();
+      let rewritten = false;
+      chans.forEach((c, i) => {
+        const legacyId = `${i}-${c.tvgId || c.name}`.replace(/[^a-zA-Z0-9-_]/g, '_');
+        if (c.id === legacyId) {
+          c.id = channelId(c, seen);
+          rewritten = true;
+        }
+        idRemap.set(`${p.id}__${legacyId}`, `${p.id}__${c.id}`);
+      });
+      if (rewritten) save(cacheKey, chans);
+    }
+    if (idRemap.size) {
+      const favourites = get().favourites.map((f) => idRemap.get(f) || f);
+      const history = get().history.map((h) => (idRemap.has(h.id) ? { ...h, id: idRemap.get(h.id) } : h));
+      set({ favourites, history });
+      save(LS.favourites, favourites);
+      save(LS.history, history);
+    }
+    localStorage.setItem(LS.idv2, '1');
+  },
+
   // Combine channels from all ENABLED playlists into the working set. Channel ids
   // are namespaced by playlist so the same id in two files never collides, and a
   // playlist's contentKind ('live'/'radio') overrides per-channel detection.
   _rebuildChannels() {
+    get()._migrateChannelIds();
     const combined = [];
     for (const p of get().playlists) {
       if (p.enabled === false) continue;
@@ -312,12 +428,7 @@ export const useStore = create((set, get) => ({
       for (const c of chans) {
         // Re-derive kind with the current classifier (so already-stored channels
         // benefit from improved detection); a playlist's contentKind overrides it.
-        const kind =
-          p.contentKind === 'live'
-            ? 'live'
-            : p.contentKind === 'radio'
-            ? 'radio'
-            : guessKind(c.group, c.name, c.url);
+        const kind = effectiveKind(p.contentKind, c);
         combined.push({ ...c, id: `${p.id}__${c.id}`, playlistId: p.id, kind });
       }
     }
@@ -377,12 +488,7 @@ export const useStore = create((set, get) => ({
       const chans = load(`ro-iptv:channels:${p.id}`, []) || [];
       const kept = [];
       for (const c of chans) {
-        const eff =
-          p.contentKind === 'live'
-            ? 'live'
-            : p.contentKind === 'radio'
-            ? 'radio'
-            : guessKind(c.group, c.name, c.url);
+        const eff = effectiveKind(p.contentKind, c);
         if (eff === kind) purgedIds.add(`${p.id}__${c.id}`);
         else kept.push(c);
       }
@@ -434,6 +540,7 @@ export const useStore = create((set, get) => ({
     const settings = { ...prev, ...partial };
     set({ settings });
     save(LS.settings, settings);
+    pushState('settings', settings);
     if ('epgUrls' in partial && JSON.stringify(partial.epgUrls) !== JSON.stringify(epgSources(prev))) {
       get().loadEpg();
     }
@@ -443,15 +550,30 @@ export const useStore = create((set, get) => ({
   playChannel(channel) {
     set({ currentChannel: channel });
     save(LS.lastChannel, channel);
-    const entry = { id: channel.id, name: channel.name, logo: channel.logo, url: channel.url, kind: channel.kind, at: Date.now() };
-    const history = [entry, ...get().history.filter((h) => h.id !== channel.id)].slice(0, 60);
+    const entry = { ...channel, at: Date.now() };
+    const history = [entry, ...get().history.filter((h) => h.id !== channel.id)].slice(0, HISTORY_CAP);
     set({ history });
     save(LS.history, history);
+    pushState('history', history);
   },
 
   restoreLastChannel() {
     const last = load(LS.lastChannel, null);
     if (last) set({ currentChannel: last });
+  },
+
+  // Play a past programme from a catchup-capable channel. Records the live channel
+  // in history (keeps the live URL), then swaps in a catchup variant carrying the
+  // archive URL so the player streams the archive with F19's seek bar.
+  playCatchup(channel, programme) {
+    const endMs = Math.min(Date.parse(programme.stop), Date.now() - CATCHUP_END_MARGIN_MS);
+    const url = catchupUrl(channel, Date.parse(programme.start), endMs);
+    if (!url) {
+      get().setToast('This channel has no usable catchup URL');
+      return;
+    }
+    get().playChannel(channel);
+    set({ currentChannel: { ...channel, url, isCatchup: true, catchupTitle: programme.title } });
   },
 
   // Stop playback entirely (clears the mini-player / current channel).
@@ -483,11 +605,13 @@ export const useStore = create((set, get) => ({
     const next = fav.includes(channelId) ? fav.filter((f) => f !== channelId) : [...fav, channelId];
     set({ favourites: next });
     save(LS.favourites, next);
+    pushState('favourites', next);
   },
 
   clearHistory() {
     set({ history: [] });
     save(LS.history, []);
+    pushState('history', []);
   },
 
   // ---- recordings ----
@@ -511,7 +635,7 @@ export const useStore = create((set, get) => ({
   },
 
   // Start capturing the given channel "now" to a file on the server.
-  async startRecording(channel, programme) {
+  async startRecording(channel, programme, minutes) {
     if (!channel) return;
     try {
       const saved = await api.startRecording({
@@ -522,6 +646,7 @@ export const useStore = create((set, get) => ({
         title: programme?.title || channel.name,
         httpUserAgent: channel.httpUserAgent || '',
         httpReferrer: channel.httpReferrer || '',
+        durationMinutes: minutes || undefined,
       });
       set({ recordings: [...get().recordings.filter((r) => r.id !== saved.id), saved] });
       get().setToast('Recording started');

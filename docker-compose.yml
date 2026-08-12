@@ -40,9 +40,14 @@ services:
       - REFRESH_INTERVAL_MINUTES=${REFRESH_INTERVAL_MINUTES:-360}
       # Max length of a single recording, in minutes (auto-stops at the cap):
       - RECORDING_MAX_MINUTES=${RECORDING_MAX_MINUTES:-180}
+      # Optional total-storage cap for recordings in GB (prunes oldest finished; blank = no cap):
+      - RECORDINGS_MAX_GB=${RECORDINGS_MAX_GB:-}
       # Lock the API to specific origins (comma-separated host / host:port /
       # origin). Empty = allow any (the app is same-origin anyway):
       - CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS:-}
+      # Set 1 to refuse proxy/playlist/EPG fetches to private/loopback addresses
+      # (SSRF hardening). Leave blank if you use LAN IPTV sources:
+      - PROXY_BLOCK_PRIVATE=${PROXY_BLOCK_PRIVATE:-}
 
     volumes:
       # Playlists, recordings (and their files) and the auth credential.

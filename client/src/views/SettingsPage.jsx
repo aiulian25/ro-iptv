@@ -32,6 +32,11 @@ const REFRESH_OPTIONS = [
   [1440, 'Every 24 hours'],
 ];
 
+// Pre/post padding options (minutes) for EPG-scheduled recordings.
+const PADDING_OPTIONS = [0, 1, 2, 5, 10, 15];
+const DEFAULT_PADDING = { before: 1, after: 5 };
+const paddingLabel = (m) => (m === 0 ? 'Off' : `${m} min`);
+
 // Full-page Settings with a draft model: every *field* edit is staged locally and
 // only committed when the single Save button is pressed. Playlist add/delete/refresh
 // remain immediate data actions (with their own buttons), not draftable fields.
@@ -63,6 +68,7 @@ export default function SettingsPage() {
     epgUrls: epgSources(settings),
     refreshIntervalMinutes: settings.refreshIntervalMinutes ?? 360,
     defaultCountry: settings.defaultCountry || '',
+    recordingPadding: settings.recordingPadding || DEFAULT_PADDING,
   };
 
   const [draft, setDraft] = useState(committed);
@@ -84,7 +90,8 @@ export default function SettingsPage() {
   const dirty =
     JSON.stringify(draft.epgUrls) !== JSON.stringify(committed.epgUrls) ||
     draft.refreshIntervalMinutes !== committed.refreshIntervalMinutes ||
-    draft.defaultCountry !== committed.defaultCountry;
+    draft.defaultCountry !== committed.defaultCountry ||
+    JSON.stringify(draft.recordingPadding) !== JSON.stringify(committed.recordingPadding);
 
   // Warn on tab-close / refresh while there are unsaved field changes.
   useEffect(() => {
@@ -102,6 +109,7 @@ export default function SettingsPage() {
       epgUrls: draft.epgUrls,
       refreshIntervalMinutes: draft.refreshIntervalMinutes,
       defaultCountry: draft.defaultCountry,
+      recordingPadding: draft.recordingPadding,
     });
     setToast('Settings saved');
   };
@@ -356,6 +364,41 @@ export default function SettingsPage() {
                 </option>
               ))}
             </select>
+          </div>
+
+          <div>
+            <h2 className="text-lg font-semibold text-primary mb-1">Recording padding</h2>
+            <p className="text-sm text-on-surface-variant mb-3">
+              Extra time captured around EPG-scheduled recordings, to absorb broadcast drift.
+            </p>
+            <div className="flex flex-col sm:flex-row gap-4">
+              <div className="flex-1">
+                <label htmlFor="pad-before" className="block text-sm text-on-surface-variant mb-1">Start early</label>
+                <select
+                  id="pad-before"
+                  value={draft.recordingPadding.before}
+                  onChange={(e) => setField('recordingPadding', { ...draft.recordingPadding, before: parseInt(e.target.value, 10) })}
+                  className="glass rounded-xl px-4 py-3 outline-none w-full"
+                >
+                  {PADDING_OPTIONS.map((m) => (
+                    <option key={m} value={m}>{paddingLabel(m)}</option>
+                  ))}
+                </select>
+              </div>
+              <div className="flex-1">
+                <label htmlFor="pad-after" className="block text-sm text-on-surface-variant mb-1">Stop late</label>
+                <select
+                  id="pad-after"
+                  value={draft.recordingPadding.after}
+                  onChange={(e) => setField('recordingPadding', { ...draft.recordingPadding, after: parseInt(e.target.value, 10) })}
+                  className="glass rounded-xl px-4 py-3 outline-none w-full"
+                >
+                  {PADDING_OPTIONS.map((m) => (
+                    <option key={m} value={m}>{paddingLabel(m)}</option>
+                  ))}
+                </select>
+              </div>
+            </div>
           </div>
         </section>
 

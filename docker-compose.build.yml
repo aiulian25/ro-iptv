@@ -52,6 +52,8 @@ services:
       - REFRESH_INTERVAL_MINUTES=${REFRESH_INTERVAL_MINUTES:-360}
       # Max length of a single recording (minutes) — a capture auto-stops at this cap
       - RECORDING_MAX_MINUTES=${RECORDING_MAX_MINUTES:-180}
+      # Optional total-storage cap for recordings in GB (prunes oldest finished; blank = no cap)
+      - RECORDINGS_MAX_GB=${RECORDINGS_MAX_GB:-}
       # Comma-separated domains/origins allowed to call the API cross-origin.
       # Empty = allow any (the app is same-origin, so this is a hardening option).
       - CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS:-}
@@ -65,6 +67,8 @@ services:
       - RATE_LIMIT_DISABLED=${RATE_LIMIT_DISABLED:-}
       - RL_UPSTREAM_MAX=${RL_UPSTREAM_MAX:-120}
       - RL_WRITE_MAX=${RL_WRITE_MAX:-120}
+      # SSRF hardening — set 1 to block private/loopback upstream fetches:
+      - PROXY_BLOCK_PRIVATE=${PROXY_BLOCK_PRIVATE:-}
       - RL_LOGIN_MAX=${RL_LOGIN_MAX:-10}
     volumes:
       - data:/data

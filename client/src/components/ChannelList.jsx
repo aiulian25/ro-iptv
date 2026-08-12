@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useMemo } from 'react';
 import { useStore } from '../store/useStore';
-import { programmesForChannel, findNowNext, progressPct } from '../lib/epg';
+import { programmesForChannel, findNowNext, progressPct, epgIconFor } from '../lib/epg';
 import ChannelLogo from './ChannelLogo';
 import FavouriteButton from './FavouriteButton';
 import Icon from './Icon';
@@ -24,6 +24,7 @@ export default function ChannelList({ channels, onSelect }) {
   const [limit, setLimit] = useState(PAGE);
   const sentinelRef = useRef(null);
   const epg = useStore((s) => s.epg);
+  const overrides = useStore((s) => s.settings.epgOverrides || {});
   const currentChannel = useStore((s) => s.currentChannel);
 
   // A stable signature for the channel *set*. The parent re-derives the array on
@@ -67,7 +68,7 @@ export default function ChannelList({ channels, onSelect }) {
   return (
     <div className="flex flex-col gap-2.5">
       {visible.map((c) => {
-        const progs = programmesForChannel(epg, c);
+        const progs = programmesForChannel(epg, c, overrides);
         const { now, next } = findNowNext(progs);
         const isActive = currentChannel?.id === c.id;
         return (
@@ -80,7 +81,10 @@ export default function ChannelList({ channels, onSelect }) {
                 : 'border-transparent hover:bg-surface-variant/30 hover:border-white/10'
             }`}
           >
-            <ChannelLogo src={c.logo} kind={c.kind} className="w-16 h-12" />
+            {c.chno != null && (
+              <span className="font-mono text-xs text-on-surface-variant w-8 shrink-0 text-right">{c.chno}</span>
+            )}
+            <ChannelLogo src={c.logo || epgIconFor(epg, c)} kind={c.kind} className="w-16 h-12" />
             <div className="flex-1 min-w-0">
               <h3 className="text-base font-semibold truncate">{c.name}</h3>
               <p className="text-sm text-on-surface-variant truncate">

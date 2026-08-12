@@ -33,6 +33,7 @@ import {
   currentSize,
   resolveFile,
   fileNameFor,
+  recordingsDir,
 } from './lib/recorder.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -248,6 +249,8 @@ app.use('/api', (req, res, next) => {
 });
 
 // ---- Simple in-memory caches (EPG + playlist text) -----------------------
+// Bounded so a run of distinct EPG/playlist URLs can't grow memory without limit.
+const MAX_CACHE_ENTRIES = 8;
 const cache = new Map();
 function cacheGet(key, ttlMs) {
   const hit = cache.get(key);
@@ -256,6 +259,10 @@ function cacheGet(key, ttlMs) {
 }
 function cacheSet(key, value) {
   cache.set(key, { at: Date.now(), value });
+  if (cache.size > MAX_CACHE_ENTRIES) {
+    const oldest = [...cache.entries()].sort((a, b) => a[1].at - b[1].at)[0];
+    cache.delete(oldest[0]);
+  }
 }
 
 const FETCH_HEADERS = {
@@ -284,6 +291,41 @@ function isValidUrl(u) {
   }
 }
 
+// Opt-in SSRF hardening for the upstream-fetching endpoints (proxy/playlist/epg).
+// This is a LITERAL-address check: a hostname that DNS-resolves to a private IP is
+// NOT caught (full protection needs resolve-and-pin, which is out of scope here).
+const BLOCK_PRIVATE = process.env.PROXY_BLOCK_PRIVATE === '1';
+
+function isPrivateHost(hostname) {
+  const h = hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  if (h === 'localhost' || h.endsWith('.localhost') || h.endsWith('.local') || h.endsWith('.internal')) return true;
+  const v4 = h.match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
+  if (v4) {
+    const [a, b] = [+v4[1], +v4[2]];
+    return (
+      a === 10 ||
+      a === 127 ||
+      a === 0 ||
+      (a === 172 && b >= 16 && b <= 31) ||
+      (a === 192 && b === 168) ||
+      (a === 169 && b === 254) ||
+      (a === 100 && b >= 64 && b <= 127)
+    );
+  }
+  if (h === '::1' || h.startsWith('fc') || h.startsWith('fd') || h.startsWith('fe80')) return true;
+  return false;
+}
+
+// Refuse literal private/loopback/link-local targets when PROXY_BLOCK_PRIVATE=1.
+// Returns false (after sending the 403) when the request should stop.
+function guardTarget(target, res) {
+  if (BLOCK_PRIVATE && isPrivateHost(new URL(target).hostname)) {
+    res.status(403).json({ error: 'Refusing to fetch a private-network URL' });
+    return false;
+  }
+  return true;
+}
+
 // ---- Health --------------------------------------------------------------
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', time: new Date().toISOString(), version: '1.0.0' });
@@ -297,6 +339,7 @@ app.all('/api/proxy', async (req, res) => {
   if (!isValidUrl(target)) {
     return res.status(400).json({ error: 'Invalid or missing url parameter' });
   }
+  if (!guardTarget(target, res)) return;
   const ua = cleanHeader(req.query.ua);
   const ref = cleanHeader(req.query.ref);
   try {
@@ -372,6 +415,7 @@ function rewriteManifest(text, manifestUrl, extra = '') {
 app.get('/api/playlist', upstreamLimiter, async (req, res) => {
   const target = req.query.url;
   if (!isValidUrl(target)) return res.status(400).json({ error: 'Invalid or missing url parameter' });
+  if (!guardTarget(target, res)) return;
   try {
     const cached = cacheGet(`pl:${target}`, 60 * 1000);
     let text = cached;
@@ -404,31 +448,52 @@ app.post('/api/parse', upstreamLimiter, (req, res) => {
 // commonly served as .xml.gz). Guards against oversized downloads / zip bombs.
 const EPG_MAX_DOWNLOAD = 200 * 1024 * 1024; // 200 MB compressed
 const EPG_MAX_DECOMPRESSED = 600 * 1024 * 1024; // 600 MB after gunzip
+const MS_PER_HOUR = 3600_000;
+const EPG_MAX_WINDOW_HOURS = 168; // 7 days — ceiling on the client-requested window
+const EPG_WINDOW_LOOKBACK_HOURS = 3; // include recently-finished programmes (Now context)
+
+// Return a windowed shallow copy of a parsed guide: only programmes overlapping
+// [now − lookback, now + hours]. `channels` is kept whole (F13 needs the full map);
+// channels with no programmes left in the window are dropped from `programmes`.
+function windowEpg(parsed, hours) {
+  const from = Date.now() - EPG_WINDOW_LOOKBACK_HOURS * MS_PER_HOUR;
+  const to = Date.now() + hours * MS_PER_HOUR;
+  const programmes = {};
+  for (const [id, list] of Object.entries(parsed.programmes || {})) {
+    const kept = list.filter((p) => Date.parse(p.stop) > from && Date.parse(p.start) < to);
+    if (kept.length) programmes[id] = kept;
+  }
+  return { channels: parsed.channels, programmes };
+}
 
 app.get('/api/epg', upstreamLimiter, async (req, res) => {
   const target = req.query.url;
   if (!isValidUrl(target)) return res.status(400).json({ error: 'Invalid or missing url parameter' });
+  if (!guardTarget(target, res)) return;
+  const hours = Math.min(EPG_MAX_WINDOW_HOURS, parseInt(req.query.hours, 10) || 0);
   try {
-    const cached = cacheGet(`epg:${target}`, 15 * 60 * 1000);
-    if (cached) return res.json(cached);
+    let parsed = cacheGet(`epg:${target}`, 15 * 60 * 1000);
+    if (!parsed) {
+      const upstream = await fetch(target, { headers: FETCH_HEADERS, redirect: 'follow' });
+      if (!upstream.ok) return res.status(upstream.status).json({ error: `Upstream ${upstream.status}` });
 
-    const upstream = await fetch(target, { headers: FETCH_HEADERS, redirect: 'follow' });
-    if (!upstream.ok) return res.status(upstream.status).json({ error: `Upstream ${upstream.status}` });
+      const buf = Buffer.from(await upstream.arrayBuffer());
+      if (buf.length > EPG_MAX_DOWNLOAD) return res.status(413).json({ error: 'EPG file too large' });
 
-    const buf = Buffer.from(await upstream.arrayBuffer());
-    if (buf.length > EPG_MAX_DOWNLOAD) return res.status(413).json({ error: 'EPG file too large' });
+      // gzip magic bytes (1f 8b) → a .xml.gz guide; otherwise treat as plain XML.
+      let xml;
+      if (buf.length > 2 && buf[0] === 0x1f && buf[1] === 0x8b) {
+        xml = zlib.gunzipSync(buf, { maxOutputLength: EPG_MAX_DECOMPRESSED }).toString('utf8');
+      } else {
+        xml = buf.toString('utf8');
+      }
 
-    // gzip magic bytes (1f 8b) → a .xml.gz guide; otherwise treat as plain XML.
-    let xml;
-    if (buf.length > 2 && buf[0] === 0x1f && buf[1] === 0x8b) {
-      xml = zlib.gunzipSync(buf, { maxOutputLength: EPG_MAX_DECOMPRESSED }).toString('utf8');
-    } else {
-      xml = buf.toString('utf8');
+      // Cache the FULL parsed guide; windowing happens per-request below.
+      parsed = parseEPG(xml);
+      cacheSet(`epg:${target}`, parsed);
     }
 
-    const parsed = parseEPG(xml);
-    cacheSet(`epg:${target}`, parsed);
-    res.json(parsed);
+    res.json(hours > 0 ? windowEpg(parsed, hours) : parsed);
   } catch (err) {
     res.status(502).json({ error: 'Failed to fetch EPG', detail: String(err) });
   }
@@ -522,8 +587,59 @@ app.delete('/api/playlists/:id', writeLimiter, async (req, res) => {
   }
 });
 
+// ---- Cross-device state sync (favourites / history / settings) -----------
+// A generic key→value collection so per-origin localStorage follows the user to
+// any device pointed at this backend, the same way playlists already do.
+const SYNCED_STATE_KEYS = ['favourites', 'history', 'settings'];
+const MAX_STATE_BYTES = 256 * 1024;
+
+app.get('/api/state', async (req, res) => {
+  res.json(await readCollection('state'));
+});
+
+app.put('/api/state/:key', writeLimiter, async (req, res) => {
+  const { key } = req.params;
+  if (!SYNCED_STATE_KEYS.includes(key)) return res.status(400).json({ error: 'Unknown state key' });
+  const value = req.body && req.body.value;
+  if (value === undefined) return res.status(400).json({ error: 'Missing value' });
+  if (JSON.stringify(value).length > MAX_STATE_BYTES) return res.status(413).json({ error: 'State too large' });
+  const rec = { key, value, updatedAt: new Date().toISOString() };
+  await updateCollection('state', (list) => {
+    const i = list.findIndex((e) => e.key === key);
+    if (i >= 0) list[i] = rec;
+    else list.push(rec);
+    return list;
+  });
+  res.json(rec);
+});
+
 // ---- Recordings ----------------------------------------------------------
 const RECORDING_MAX_MINUTES = parseInt(process.env.RECORDING_MAX_MINUTES || '180', 10);
+const BYTES_PER_GB = 1024 ** 3;
+// Total-storage cap for recordings (GB → bytes); null = unlimited (no pruning).
+const RECORDINGS_MAX_BYTES = parseFloat(process.env.RECORDINGS_MAX_GB || '0') * BYTES_PER_GB || null;
+// Statuses whose files may be pruned by retention — never an active 'recording'/'scheduled'.
+const PRUNABLE_STATUSES = new Set(['completed', 'interrupted', 'failed', 'missed']);
+
+// Sum of all files currently in the recordings directory (ENOENT → 0).
+async function recordingsDirBytes() {
+  const dir = recordingsDir(DATA_DIR);
+  let names;
+  try {
+    names = await fs.readdir(dir);
+  } catch {
+    return 0;
+  }
+  let total = 0;
+  for (const name of names) {
+    try {
+      total += (await fs.stat(path.join(dir, name))).size;
+    } catch {
+      /* file vanished between readdir and stat */
+    }
+  }
+  return total;
+}
 
 async function updateRecording(id, patch) {
   await updateCollection('recordings', (list) => {
@@ -560,6 +676,8 @@ app.get('/api/recordings', async (req, res) => {
 app.post('/api/recordings/start', writeLimiter, async (req, res) => {
   const b = req.body || {};
   if (!isValidUrl(b.url)) return res.status(400).json({ error: 'Invalid or missing stream url' });
+  // Requested duration, clamped to [1, RECORDING_MAX_MINUTES]; absent/invalid → the max (today's default).
+  const mins = Math.max(1, Math.min(RECORDING_MAX_MINUTES, parseInt(b.durationMinutes, 10) || RECORDING_MAX_MINUTES));
   const id = randomUUID();
   const rec = {
     id,
@@ -571,7 +689,7 @@ app.post('/api/recordings/start', writeLimiter, async (req, res) => {
     httpUserAgent: cleanHeader(b.httpUserAgent),
     httpReferrer: cleanHeader(b.httpReferrer),
     start: new Date().toISOString(),
-    end: new Date(Date.now() + RECORDING_MAX_MINUTES * 60000).toISOString(),
+    end: new Date(Date.now() + mins * 60000).toISOString(),
     status: 'recording',
     filename: fileNameFor(id),
     size: 0,
@@ -585,7 +703,7 @@ app.post('/api/recordings/start', writeLimiter, async (req, res) => {
     startCapture({
       rec,
       dataDir: DATA_DIR,
-      maxMinutes: RECORDING_MAX_MINUTES,
+      maxMinutes: mins,
       userAgent: rec.httpUserAgent || FETCH_HEADERS['User-Agent'],
       referer: rec.httpReferrer,
       onFinish: onCaptureFinish,
@@ -690,6 +808,25 @@ app.delete('/api/recordings/:id', writeLimiter, async (req, res) => {
   }
 });
 
+// Storage meter: recordings footprint, free/total disk on the data volume, and the cap.
+app.get('/api/storage', async (req, res) => {
+  try {
+    const recordingsBytes = await recordingsDirBytes();
+    let diskFreeBytes = null;
+    let diskTotalBytes = null;
+    try {
+      const s = await fs.statfs(DATA_DIR);
+      diskFreeBytes = s.bavail * s.bsize;
+      diskTotalBytes = s.blocks * s.bsize;
+    } catch {
+      /* statfs unsupported — report nulls, meter degrades gracefully */
+    }
+    res.json({ recordingsBytes, diskFreeBytes, diskTotalBytes, maxBytes: RECORDINGS_MAX_BYTES });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to read storage', detail: String(err) });
+  }
+});
+
 // ---- Runtime config exposed to the client --------------------------------
 app.get('/api/config', (req, res) => {
   res.json({
@@ -720,33 +857,88 @@ app.get(/^\/(?!api\/).*/, async (req, res) => {
 // record whatever partial size landed on disk.
 async function reconcileRecordings() {
   const list = await readCollection('recordings');
+  const resumes = [];
   let changed = false;
   for (const r of list) {
-    if (r.status === 'recording' && !isRecording(r.id)) {
-      r.status = 'interrupted';
-      r.end = r.end || new Date().toISOString();
-      const fp = r.filename && resolveFile(DATA_DIR, r.filename);
-      if (fp) {
-        try {
-          r.size = (await fs.stat(fp)).size;
-        } catch {
-          /* file gone */
-        }
+    if (r.status !== 'recording' || isRecording(r.id)) continue;
+    const originalEnd = r.end;
+    r.status = 'interrupted';
+    r.end = r.end || new Date().toISOString();
+    const fp = r.filename && resolveFile(DATA_DIR, r.filename);
+    if (fp) {
+      try {
+        r.size = (await fs.stat(fp)).size;
+      } catch {
+        /* file gone */
       }
-      changed = true;
+    }
+    changed = true;
+
+    // Window still open → re-queue the remainder as a fresh scheduled record. A new
+    // id/file is required because startCapture runs ffmpeg -y and would overwrite the
+    // partial; the scheduler picks this up within a tick while the partial stays playable.
+    if (originalEnd && Date.parse(originalEnd) > Date.now()) {
+      resumes.push({
+        ...r,
+        id: randomUUID(),
+        title: `${r.title} (resumed)`,
+        start: new Date().toISOString(),
+        end: originalEnd,
+        status: 'scheduled',
+        filename: '',
+        size: 0,
+        createdAt: new Date().toISOString(),
+      });
+      r.end = new Date().toISOString(); // the original capture truly ended at restart
     }
   }
+  if (resumes.length) list.push(...resumes);
   if (changed) await writeCollection('recordings', list);
+}
+
+// Prune the oldest finished recordings (with a file on disk) until the directory
+// total is back under RECORDINGS_MAX_BYTES. Never touches an active capture. Cheap
+// no-op when the cap is unset — runs on every scheduler tick, before captures start.
+async function enforceRetention() {
+  if (!RECORDINGS_MAX_BYTES) return;
+  let total = await recordingsDirBytes();
+  if (total <= RECORDINGS_MAX_BYTES) return;
+
+  const oldestFirst = (await readCollection('recordings'))
+    .filter((r) => PRUNABLE_STATUSES.has(r.status) && !isRecording(r.id) && r.filename)
+    .sort((a, b) => Date.parse(a.start) - Date.parse(b.start));
+
+  for (const r of oldestFirst) {
+    if (total <= RECORDINGS_MAX_BYTES) break;
+    const filePath = resolveFile(DATA_DIR, r.filename);
+    let freed = 0;
+    if (filePath) {
+      try {
+        freed = (await fs.stat(filePath)).size;
+        await fs.unlink(filePath);
+      } catch {
+        freed = 0; // file already gone — still drop the stale record below
+      }
+    }
+    await updateCollection('recordings', (list) => list.filter((x) => x.id !== r.id));
+    total -= freed;
+    console.warn('retention: pruned', r.id, r.title);
+  }
 }
 
 // Start/finish scheduled (EPG) recordings at their programme times.
 async function tickScheduler() {
+  await enforceRetention();
   const now = Date.now();
   const list = await readCollection('recordings');
   for (const r of list) {
     if (r.status !== 'scheduled') continue;
     const start = Date.parse(r.start);
     const end = Date.parse(r.end);
+    if (end <= now) {
+      await updateRecording(r.id, { status: 'missed' });
+      continue;
+    }
     if (start <= now && now < end && !isRecording(r.id)) {
       const mins = Math.min(RECORDING_MAX_MINUTES, Math.max(1, Math.ceil((end - now) / 60000)));
       await updateRecording(r.id, { status: 'recording', filename: fileNameFor(r.id), start: new Date().toISOString() });

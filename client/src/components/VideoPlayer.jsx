@@ -1,8 +1,16 @@
 import { useEffect, useRef, useState, useCallback, forwardRef, useImperativeHandle } from 'react';
 import Hls from 'hls.js';
 import Icon from './Icon';
-import { proxied } from '../lib/api';
+import { attachStream } from '../lib/playSource';
 import { useMediaSession } from '../hooks/useMediaSession';
+
+// Seconds → h:mm:ss (or m:ss under an hour).
+const fmtClock = (s) => {
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = Math.floor(s % 60);
+  return (h ? [h, m, sec] : [m, sec]).map((v, i) => String(v).padStart(i ? 2 : 1, '0')).join(':');
+};
 
 // HLS.js for .m3u8; native <video> for progressive MP4. Includes keyboard
 // shortcuts (space/f/m), fullscreen, PiP, and a quality selector.
@@ -17,6 +25,8 @@ const VideoPlayer = forwardRef(function VideoPlayer({ channel, onPrev, onNext, o
   const [playing, setPlaying] = useState(false);
   const [muted, setMuted] = useState(false);
   const [showQuality, setShowQuality] = useState(false);
+  // Finite media (VOD/catchup) only: {cur, dur} in seconds. dur stays 0 for live.
+  const [time, setTime] = useState({ cur: 0, dur: 0 });
 
   const isHls = channel && /\.m3u8(\?|$)/i.test(channel.url || '');
 
@@ -29,50 +39,41 @@ const VideoPlayer = forwardRef(function VideoPlayer({ channel, onPrev, onNext, o
     setError(null);
     setLevels([]);
     setCurrentLevel(-1);
+    setTime({ cur: 0, dur: 0 });
 
-    // Route through backend proxy to defeat CORS / mixed-content issues, and
-    // forward any per-channel UA/Referer the stream requires.
-    const src = proxied(channel.url, channel.httpUserAgent, channel.httpReferrer);
+    // Track position/duration; dur is 0 for live streams (infinite duration).
+    const onTime = () =>
+      setTime({ cur: video.currentTime, dur: Number.isFinite(video.duration) ? video.duration : 0 });
+    video.addEventListener('timeupdate', onTime);
+    video.addEventListener('durationchange', onTime);
 
-    if (isHls && Hls.isSupported()) {
-      const hls = new Hls({ lowLatencyMode: true, enableWorker: true, backBufferLength: 30 });
-      hlsRef.current = hls;
-      hls.loadSource(src);
-      hls.attachMedia(video);
-      hls.on(Hls.Events.MANIFEST_PARSED, (_e, data) => {
+    // Try the stream directly first (saves proxy bandwidth on CORS-open upstreams),
+    // transparently falling back to the proxy on a startup failure.
+    const stop = attachStream(video, channel, {
+      hlsRef,
+      isHls,
+      hlsConfig: { lowLatencyMode: true, enableWorker: true, backBufferLength: 30 },
+      onManifest: (data) => {
         setLevels(data.levels || []);
         video.play().catch(() => {});
-      });
-      hls.on(Hls.Events.LEVEL_SWITCHED, (_e, data) => setCurrentLevel(data.level));
-      hls.on(Hls.Events.ERROR, (_e, data) => {
-        if (data.fatal) {
-          switch (data.type) {
-            case Hls.ErrorTypes.NETWORK_ERROR:
-              hls.startLoad();
-              break;
-            case Hls.ErrorTypes.MEDIA_ERROR:
-              hls.recoverMediaError();
-              break;
-            default:
-              setError('This stream could not be played.');
-              hls.destroy();
-          }
+      },
+      onLevelSwitched: (level) => setCurrentLevel(level),
+      onError: (data) => {
+        if (data.unsupported) return setError('HLS is not supported in this browser.');
+        if (data.native) return setError('This stream could not be played.');
+        if (data.type === Hls.ErrorTypes.NETWORK_ERROR) hlsRef.current?.startLoad();
+        else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) hlsRef.current?.recoverMediaError();
+        else {
+          setError('This stream could not be played.');
+          hlsRef.current?.destroy();
         }
-      });
-    } else if (video.canPlayType('application/vnd.apple.mpegurl') || !isHls) {
-      // Native HLS (Safari) or direct progressive media.
-      video.src = src;
-      video.play().catch(() => {});
-      video.onerror = () => setError('This stream could not be played.');
-    } else {
-      setError('HLS is not supported in this browser.');
-    }
+      },
+    });
 
     return () => {
-      if (hlsRef.current) {
-        hlsRef.current.destroy();
-        hlsRef.current = null;
-      }
+      video.removeEventListener('timeupdate', onTime);
+      video.removeEventListener('durationchange', onTime);
+      stop();
       video.removeAttribute('src');
       video.load?.();
     };
@@ -140,6 +141,12 @@ const VideoPlayer = forwardRef(function VideoPlayer({ channel, onPrev, onNext, o
     setShowQuality(false);
   };
 
+  // Source badge: catchup archive → VOD (finite) → live HLS → progressive.
+  let badgeLabel = 'DIRECT';
+  if (channel?.isCatchup) badgeLabel = 'CATCHUP';
+  else if (time.dur > 0) badgeLabel = 'VOD';
+  else if (isHls) badgeLabel = 'HLS • LIVE';
+
   return (
     <div ref={containerRef} className="relative w-full h-full bg-black rounded-3xl overflow-hidden group">
       <video
@@ -161,11 +168,31 @@ const VideoPlayer = forwardRef(function VideoPlayer({ channel, onPrev, onNext, o
 
       {/* HD badge */}
       <div className="absolute top-4 right-4 glass px-3 py-1 rounded-full border border-primary/40">
-        <span className="font-mono text-xs text-primary">{isHls ? 'HLS • LIVE' : 'DIRECT'}</span>
+        <span className="font-mono text-xs text-primary">{badgeLabel}</span>
       </div>
 
       {/* Control bar */}
-      <div className="absolute bottom-0 inset-x-0 p-3 md:p-4 bg-gradient-to-t from-black/80 to-transparent flex items-center gap-3 opacity-100 md:opacity-0 md:group-hover:opacity-100 transition-opacity">
+      <div className="absolute bottom-0 inset-x-0 p-3 md:p-4 bg-gradient-to-t from-black/80 to-transparent flex flex-col gap-2 opacity-100 md:opacity-0 md:group-hover:opacity-100 transition-opacity">
+        {/* Scrubber — only for finite media (VOD/catchup); live streams have no duration */}
+        {time.dur > 0 && (
+          <div className="flex items-center gap-2 px-1">
+            <span className="font-mono text-[11px] text-white/80">{fmtClock(time.cur)}</span>
+            <input
+              type="range"
+              min="0"
+              max={time.dur}
+              step="1"
+              value={time.cur}
+              onChange={(e) => {
+                videoRef.current.currentTime = parseFloat(e.target.value);
+              }}
+              aria-label="Seek"
+              className="flex-1 accent-primary h-1"
+            />
+            <span className="font-mono text-[11px] text-white/80">{fmtClock(time.dur)}</span>
+          </div>
+        )}
+        <div className="flex items-center gap-3">
         <button onClick={togglePlay} className="text-white hover:text-primary">
           <Icon name={playing ? 'pause' : 'play_arrow'} fill className="text-3xl" />
         </button>
@@ -208,6 +235,7 @@ const VideoPlayer = forwardRef(function VideoPlayer({ channel, onPrev, onNext, o
         <button onClick={toggleFullscreen} className="text-white hover:text-primary" title="Fullscreen (f)">
           <Icon name="fullscreen" className="text-2xl" />
         </button>
+        </div>
       </div>
     </div>
   );

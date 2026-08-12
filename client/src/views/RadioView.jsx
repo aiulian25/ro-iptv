@@ -1,10 +1,14 @@
 import { useMemo, useState, useEffect } from 'react';
-import { useStore, selectFilteredChannels } from '../store/useStore';
+import { useStore, selectFilteredChannels, selectCountries } from '../store/useStore';
+import { countryFlag, countryName, channelCountry } from '../lib/country';
 import CategoryChips from '../components/CategoryChips';
 import RadioPlayer from '../components/RadioPlayer';
 import ChannelLogo from '../components/ChannelLogo';
 import FavouriteButton from '../components/FavouriteButton';
 import Icon from '../components/Icon';
+
+// Sentinel for the country <select>: '*' = every country, '' = the Undefined bucket.
+const ALL_COUNTRIES = '*';
 
 export default function RadioView() {
   const state = useStore();
@@ -12,25 +16,31 @@ export default function RadioView() {
   const currentChannel = useStore((s) => s.currentChannel);
   const stopPlayback = useStore((s) => s.stopPlayback);
   const [active, setActive] = useState(null);
+  const [country, setCountry] = useState(ALL_COUNTRIES);
 
   const stations = useMemo(() => selectFilteredChannels(state, 'radio'), [state]);
+  const countries = useMemo(() => selectCountries(state, 'radio'), [state.channels]);
+  const visibleStations = useMemo(
+    () => (country === ALL_COUNTRIES ? stations : stations.filter((s) => channelCountry(s) === country)),
+    [stations, country]
+  );
 
   // Keep a sensible default selected station.
   useEffect(() => {
-    if (!active && stations.length) {
+    if (!active && visibleStations.length) {
       const fromCurrent = currentChannel?.kind === 'radio' ? currentChannel : null;
-      setActive(fromCurrent || stations[0]);
+      setActive(fromCurrent || visibleStations[0]);
     }
-  }, [stations, active, currentChannel]);
+  }, [visibleStations, active, currentChannel]);
 
   const select = (s) => {
     setActive(s);
     playChannel(s);
   };
 
-  const idx = stations.findIndex((s) => s.id === active?.id);
-  const prev = () => idx > 0 && select(stations[idx - 1]);
-  const nextStation = () => idx < stations.length - 1 && select(stations[idx + 1]);
+  const idx = visibleStations.findIndex((s) => s.id === active?.id);
+  const prev = () => idx > 0 && select(visibleStations[idx - 1]);
+  const nextStation = () => idx < visibleStations.length - 1 && select(visibleStations[idx + 1]);
 
   return (
     <div className="md:ml-20 pt-24 md:pt-28 px-4 md:px-8 pb-8 min-h-screen flex flex-col lg:flex-row gap-6">
@@ -38,14 +48,28 @@ export default function RadioView() {
         <div className="mb-5">
           <h1 className="text-2xl md:text-3xl font-semibold">Live Radio Stations</h1>
           <p className="text-on-surface-variant">
-            {stations.length} stations • ultra-HD audio from around the globe.
+            {visibleStations.length} stations • ultra-HD audio from around the globe.
           </p>
+          <label className="sr-only" htmlFor="radio-country">Filter stations by country</label>
+          <select
+            id="radio-country"
+            value={country}
+            onChange={(e) => setCountry(e.target.value)}
+            className="glass rounded-xl px-4 py-3 outline-none mt-3 w-full sm:w-auto max-w-full"
+          >
+            <option value={ALL_COUNTRIES}>🌐 All countries</option>
+            {countries.map(([code, count]) => (
+              <option key={code || 'undef'} value={code}>
+                {countryFlag(code)} {countryName(code)} ({count})
+              </option>
+            ))}
+          </select>
         </div>
         <div className="mb-4">
           <CategoryChips kind="radio" />
         </div>
 
-        {stations.length === 0 ? (
+        {visibleStations.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-24 text-on-surface-variant gap-3">
             <Icon name="radio" className="text-6xl opacity-60" />
             <p>No radio stations found in this playlist.</p>
@@ -53,7 +77,7 @@ export default function RadioView() {
           </div>
         ) : (
           <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4 max-h-[calc(100vh-260px)] overflow-y-auto scroll-area pr-1">
-            {stations.map((s) => {
+            {visibleStations.map((s) => {
               const isActive = active?.id === s.id;
               return (
                 <div

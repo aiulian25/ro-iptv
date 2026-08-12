@@ -72,7 +72,16 @@ export const api = {
       body: text,
     }),
 
-  fetchEpg: (url) => jsonFetch(`${BASE}/api/epg?url=${encodeURIComponent(url)}`),
+  fetchEpg: (url) => jsonFetch(`${BASE}/api/epg?url=${encodeURIComponent(url)}&hours=48`),
+
+  // Cross-device state sync (favourites / history / settings).
+  listState: () => jsonFetch(`${BASE}/api/state`),
+  saveState: (key, value) =>
+    jsonFetch(`${BASE}/api/state/${key}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ value }),
+    }),
 
   listPlaylists: () => jsonFetch(`${BASE}/api/playlists`),
   savePlaylist: (p) =>
@@ -93,6 +102,8 @@ export const api = {
     }),
 
   listRecordings: () => jsonFetch(`${BASE}/api/recordings`),
+  // Storage meter: recordings footprint, free/total disk, and the optional cap.
+  storage: () => jsonFetch(`${BASE}/api/storage`),
   // Schedule a future (EPG) recording.
   saveRecording: (r) =>
     jsonFetch(`${BASE}/api/recordings`, {
@@ -133,6 +144,44 @@ export function proxied(url, ua = '', referer = '') {
   if (ua) out += `&ua=${encodeURIComponent(ua)}`;
   if (referer) out += `&ref=${encodeURIComponent(referer)}`;
   return out;
+}
+
+// Per-session memo of which upstream URLs played directly (bandwidth saver): the
+// player probes direct-first and records the outcome so later zaps skip re-probing.
+const DIRECT_MEMO_KEY = 'ro-iptv:directok';
+
+function readDirectMemo() {
+  try {
+    return JSON.parse(sessionStorage.getItem(DIRECT_MEMO_KEY) || '{}');
+  } catch {
+    return {};
+  }
+}
+
+// Record whether a URL played directly (true) or had to fall back to the proxy (false).
+export function memoDirect(url, ok) {
+  try {
+    const memo = readDirectMemo();
+    memo[url] = ok;
+    sessionStorage.setItem(DIRECT_MEMO_KEY, JSON.stringify(memo));
+  } catch {
+    /* storage disabled / private mode — just skip the memo */
+  }
+}
+
+// Ordered playback sources for a channel: [direct, proxied] when a direct attempt
+// is worth trying, else [proxied] only. Direct is skipped when the stream needs
+// custom headers (only the proxy forwards them), when an http URL on an https page
+// would be blocked as mixed content, or when a prior direct attempt is known to fail.
+export function sourceCandidates(channel) {
+  const { url = '', httpUserAgent, httpReferrer } = channel || {};
+  const proxiedUrl = proxied(url, httpUserAgent, httpReferrer);
+  if (httpUserAgent || httpReferrer) return [proxiedUrl];
+  if (typeof window !== 'undefined' && window.location.protocol === 'https:' && url.startsWith('http:')) {
+    return [proxiedUrl];
+  }
+  if (readDirectMemo()[url] === false) return [proxiedUrl];
+  return [url, proxiedUrl];
 }
 
 export default api;
