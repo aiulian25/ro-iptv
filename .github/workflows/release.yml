@@ -31,12 +31,15 @@ jobs:
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3
 
+      # Auth with a PAT (secret GHCR_PAT, scope packages:write) instead of the
+      # ephemeral GITHUB_TOKEN: the ro-iptv package was first created by a manual
+      # push, so the repo's GITHUB_TOKEN only has read access to it.
       - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          password: ${{ secrets.GHCR_PAT }}
 
       - name: Image metadata (tags + labels)
         id: meta
