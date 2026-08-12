@@ -1,6 +1,6 @@
 {
   "name": "ro-iptv-server",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "description": "RO-IPTV backend: M3U proxy, EPG parser, CORS bypass, persistence",
   "type": "module",
