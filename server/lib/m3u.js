@@ -3,6 +3,11 @@
 
 const ATTR_RE = /([a-zA-Z0-9_-]+)="([^"]*)"/g;
 
+// A playlist entry is only a stream if it carries a scheme (http, https, rtmp,
+// rtsp, udp, …). Every channel is fetched over the network, so a schemeless line
+// could never have played anyway.
+const STREAM_URL_RE = /^[a-z][a-z0-9+.-]*:\/\//i;
+
 // djb2 hash (unsigned, base36) — short content hash for stable channel ids.
 // Duplicated from client/src/lib/uid.js (the server has no shared lib with the client).
 function hashStr(s) {
@@ -108,8 +113,12 @@ export function parseM3U(text = '') {
     } else if (line.startsWith('#')) {
       // Other directives (#KODIPROP, etc.) — ignore for now.
       continue;
+    } else if (!STREAM_URL_RE.test(line)) {
+      // Not a stream URL. Playlists in the wild carry `;` section banners and stray
+      // notes, and treating those as URLs invented a phantom channel per line —
+      // unplayable, unnamed, and counted in the channel total.
+      continue;
     } else {
-      // This is a URL line.
       const url = line;
       const base = current || { name: `Channel ${idx + 1}`, tvgId: '', tvgName: '', logo: '', group: 'Uncategorized', httpUserAgent: '', httpReferrer: '', radio: false, chno: null, tvgShift: 0, catchup: '', catchupSource: '', catchupDays: 0 };
       channels.push({
