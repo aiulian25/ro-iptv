@@ -1,6 +1,6 @@
 {
   "name": "ro-iptv",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "private": true,
   "description": "RO-IPTV — self-hosted M3U/IPTV PWA player (React + Express, single Docker image).",
   "scripts": {

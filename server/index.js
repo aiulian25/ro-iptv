@@ -313,7 +313,7 @@ function guardTarget(target, res) {
 
 // ---- Health --------------------------------------------------------------
 app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok', time: new Date().toISOString(), version: '1.2.1' });
+  res.json({ status: 'ok', time: new Date().toISOString(), version: '1.2.2' });
 });
 
 // ---- CORS / stream proxy -------------------------------------------------
