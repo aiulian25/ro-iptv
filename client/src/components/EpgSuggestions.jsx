@@ -7,6 +7,10 @@ const TITLE = 'Suggested guides for your countries';
 const SUBTITLE = 'Public XMLTV guides for the countries your channels are in. Check one to see how much of your channel list it covers before adding it.';
 const EMPTY = 'No public guide is known for the countries in your playlists yet.';
 const NO_CHANNELS = 'Add a playlist first — suggestions follow the countries your channels are in.';
+// Building the suggestion list re-reads every enabled playlist, and a URL playlist
+// on a slow upstream can take tens of seconds. Say so, rather than rendering
+// nothing: an absent section reads as a missing feature, not as work in progress.
+const LOADING = 'Looking for guides that match your channels…';
 const CHECK_LABEL = 'Check';
 const CHECKING_LABEL = 'Checking…';
 const ADD_LABEL = 'Add';
@@ -51,53 +55,55 @@ export default function EpgSuggestions({ epgUrls, onAdd }) {
     }
   };
 
-  if (!suggestions) return null;
+  const renderBody = () => {
+    if (!suggestions) return <p className="text-sm text-on-surface-variant" role="status">{LOADING}</p>;
+    if (suggestions.length === 0) return <p className="text-sm text-on-surface-variant">{`${EMPTY} ${NO_CHANNELS}`}</p>;
+
+    return (
+      <ul className="flex flex-col gap-2">
+        {suggestions.map((suggestion) => {
+          const result = results[suggestion.url];
+          const isChecking = checking === suggestion.url;
+          const alreadyAdded = epgUrls.includes(suggestion.url);
+          return (
+            <li key={`${suggestion.id}-${suggestion.country}`} className="glass rounded-xl px-3 py-2.5 flex flex-wrap items-center gap-x-3 gap-y-2">
+              <span className="text-xl leading-none shrink-0" aria-hidden="true">{countryFlag(suggestion.country)}</span>
+              <div className="flex-1 min-w-0">
+                <p className="text-sm font-medium truncate">
+                  {suggestion.name} <span className="text-on-surface-variant font-normal">· {countryName(suggestion.country)}</span>
+                </p>
+                <p className="text-xs font-mono text-on-surface-variant truncate" title={suggestion.url}>{suggestion.url}</p>
+                {result && <MatchSummary result={result} />}
+              </div>
+              <div className="flex items-center gap-2 shrink-0">
+                <button
+                  onClick={() => check(suggestion)}
+                  disabled={isChecking}
+                  className="glass rounded-full px-4 py-1.5 text-sm hover:bg-white/10 transition-colors disabled:opacity-50"
+                >
+                  {isChecking ? CHECKING_LABEL : CHECK_LABEL}
+                </button>
+                <button
+                  onClick={() => onAdd(suggestion.url)}
+                  disabled={alreadyAdded}
+                  className="bg-primary text-on-primary rounded-full px-4 py-1.5 text-sm font-medium hover:scale-105 transition-transform disabled:opacity-50 disabled:hover:scale-100"
+                >
+                  {alreadyAdded ? ADDED_LABEL : ADD_LABEL}
+                </button>
+              </div>
+            </li>
+          );
+        })}
+      </ul>
+    );
+  };
 
   return (
     <div className="mb-4">
       <SidecarStatus status={sidecar} />
       <h3 className="text-sm font-semibold text-on-surface mb-1">{TITLE}</h3>
       <p className="text-sm text-on-surface-variant mb-3">{SUBTITLE}</p>
-
-      {suggestions.length === 0 ? (
-        <p className="text-sm text-on-surface-variant">{EMPTY}</p>
-      ) : (
-        <ul className="flex flex-col gap-2">
-          {suggestions.map((suggestion) => {
-            const result = results[suggestion.url];
-            const isChecking = checking === suggestion.url;
-            const alreadyAdded = epgUrls.includes(suggestion.url);
-            return (
-              <li key={`${suggestion.id}-${suggestion.country}`} className="glass rounded-xl px-3 py-2.5 flex flex-wrap items-center gap-x-3 gap-y-2">
-                <span className="text-xl leading-none shrink-0" aria-hidden="true">{countryFlag(suggestion.country)}</span>
-                <div className="flex-1 min-w-0">
-                  <p className="text-sm font-medium truncate">
-                    {suggestion.name} <span className="text-on-surface-variant font-normal">· {countryName(suggestion.country)}</span>
-                  </p>
-                  <p className="text-xs font-mono text-on-surface-variant truncate" title={suggestion.url}>{suggestion.url}</p>
-                  {result && <MatchSummary result={result} />}
-                </div>
-                <div className="flex items-center gap-2 shrink-0">
-                  <button
-                    onClick={() => check(suggestion)}
-                    disabled={isChecking}
-                    className="glass rounded-full px-4 py-1.5 text-sm hover:bg-white/10 transition-colors disabled:opacity-50"
-                  >
-                    {isChecking ? CHECKING_LABEL : CHECK_LABEL}
-                  </button>
-                  <button
-                    onClick={() => onAdd(suggestion.url)}
-                    disabled={alreadyAdded}
-                    className="bg-primary text-on-primary rounded-full px-4 py-1.5 text-sm font-medium hover:scale-105 transition-transform disabled:opacity-50 disabled:hover:scale-100"
-                  >
-                    {alreadyAdded ? ADDED_LABEL : ADD_LABEL}
-                  </button>
-                </div>
-              </li>
-            );
-          })}
-        </ul>
-      )}
+      {renderBody()}
     </div>
   );
 }
