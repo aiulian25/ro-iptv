@@ -46,12 +46,28 @@ buildx-init: ## Ensure a multi-arch buildx builder + qemu emulation exist
 	@docker run --privileged --rm tonistiigi/binfmt --install all >/dev/null 2>&1 || true
 
 # Build BOTH arches and push a single manifest list. Pass VERSION=x.y.z to also
-# stamp a version tag alongside :latest, e.g. `make release VERSION=1.1.0`.
+# stamp a version tag alongside :latest, e.g. `make release VERSION=1.2.0`.
+#
+# This is the only way images are published — there is no CI build. Releasing
+# from a workstation cross-builds the Node stages natively (see the
+# $BUILDPLATFORM pins in the Dockerfile) and takes well under a minute, whereas
+# the old GitHub Actions job emulated the arm64 npm install under QEMU and hung
+# indefinitely.
+REVISION := $(shell git rev-parse HEAD)
+CREATED  := $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
+# 1.2.0 -> 1.2, so pulls can float on the minor series. Empty for VERSION=latest.
+MINOR    := $(shell echo $(VERSION) | grep -oE '^[0-9]+\.[0-9]+')
+
 release: login buildx-init ## Build + push multi-arch image to GHCR (amd64 + arm64)
 	docker buildx build --builder $(BUILDER) --platform $(PLATFORMS) \
-	  -t $(IMAGE):$(VERSION) $(if $(filter-out latest,$(VERSION)),-t $(IMAGE):latest,) \
+	  -t $(IMAGE):$(VERSION) \
+	  $(if $(MINOR),-t $(IMAGE):$(MINOR),) \
+	  $(if $(filter-out latest,$(VERSION)),-t $(IMAGE):latest,) \
+	  --label "org.opencontainers.image.revision=$(REVISION)" \
+	  --label "org.opencontainers.image.version=$(VERSION)" \
+	  --label "org.opencontainers.image.created=$(CREATED)" \
 	  --push -f $(DOCKERFILE) .
-	@echo "✓ pushed $(IMAGE):$(VERSION) ($(PLATFORMS))"
+	@echo "✓ pushed $(IMAGE):$(VERSION) $(if $(MINOR),+ :$(MINOR),) + :latest ($(PLATFORMS))"
 
 # ---- Security scanning ----------------------------------------------------
 scan: hadolint trivy grype sbom ## Run the full local scan suite (after build)

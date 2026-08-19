@@ -3,7 +3,11 @@
 # ----------------------------------------------------------------------------
 # Stage 1 — build the React/Vite frontend
 # ----------------------------------------------------------------------------
-FROM node:20-alpine AS client-build
+# Pinned to the *build* platform, not the target: this stage emits static
+# JS/CSS, so its output is identical for every architecture. Without the pin,
+# a multi-arch build re-runs the whole npm install + vite build under QEMU for
+# each extra arch, which cost ~45min of emulation for a byte-identical `dist`.
+FROM --platform=$BUILDPLATFORM node:20-alpine AS client-build
 WORKDIR /app/client
 COPY client/package*.json ./
 RUN npm install
@@ -13,7 +17,11 @@ RUN npm run build
 # ----------------------------------------------------------------------------
 # Stage 2 — install backend production deps
 # ----------------------------------------------------------------------------
-FROM node:20-alpine AS server-deps
+# Also build-platform pinned. Safe only because every runtime dependency is
+# pure JavaScript (no compiled .node addons), so the installed tree is
+# architecture-independent. Adding a dep with a native binding means dropping
+# this pin.
+FROM --platform=$BUILDPLATFORM node:20-alpine AS server-deps
 WORKDIR /app/server
 COPY server/package*.json ./
 RUN npm install --omit=dev
