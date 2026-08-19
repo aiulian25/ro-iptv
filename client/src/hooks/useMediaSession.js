@@ -56,7 +56,7 @@ export function clearNowPlaying() {
   }
 }
 
-export function useMediaSession({ mediaRef, channel, playing, onPrev, onNext, onStop }) {
+export function useMediaSession({ mediaRef, channel, playing, onPrev, onNext, onStop, trackTitle = '' }) {
   // Point the global controller at this player while it's the active one. Runs
   // after every render so the callbacks/element stay current.
   useEffect(() => {
@@ -68,13 +68,14 @@ export function useMediaSession({ mediaRef, channel, playing, onPrev, onNext, on
     ctl.onStop = onStop;
   });
 
-  // Now-playing metadata — only when the channel identity changes.
+  // Now-playing metadata — when the channel identity changes, or when the live
+  // track does (radio reports the current song over ICY; see lib/icy.js).
   useEffect(() => {
     if (!hasMS || !channel || typeof window.MediaMetadata !== 'function') return;
     try {
       navigator.mediaSession.metadata = new window.MediaMetadata({
-        title: channel.name || 'RO-IPTV',
-        artist: channel.group || (channel.kind === 'radio' ? 'Radio' : 'Live TV'),
+        title: trackTitle || channel.name || 'RO-IPTV',
+        artist: trackTitle ? channel.name : channel.group || (channel.kind === 'radio' ? 'Radio' : 'Live TV'),
         album: 'RO-IPTV',
         artwork: channel.logo
           ? [
@@ -87,7 +88,7 @@ export function useMediaSession({ mediaRef, channel, playing, onPrev, onNext, on
     } catch {
       /* ignore */
     }
-  }, [channel?.id, channel?.name, channel?.logo, channel?.group, channel?.kind]);
+  }, [channel?.id, channel?.name, channel?.logo, channel?.group, channel?.kind, trackTitle]);
 
   // Reflect play/pause so the OS shows the right icon.
   useEffect(() => {

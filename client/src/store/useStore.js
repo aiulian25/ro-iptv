@@ -4,6 +4,7 @@ import { parseM3U, effectiveKind, channelId } from '../lib/m3u';
 import { uid } from '../lib/uid';
 import { channelCountry, channelCategories, countryName } from '../lib/country';
 import { catchupUrl } from '../lib/catchup';
+import { setAltNameIndex } from '../lib/epg';
 
 // Configured EPG source URLs (migrates the legacy single `epgUrl`).
 export function epgSources(settings = {}) {
@@ -511,8 +512,10 @@ export const useStore = create((set, get) => ({
     get().setToast(`Deleted all ${kind === 'live' ? 'Live TV' : 'Radio'} channels`);
   },
 
-  // Fetch every configured EPG source and merge them (iptv-org/epg is grabbed
-  // per-site, so several guides are normal). Channels are keyed by xmltv_id.
+  // Load the guide. The server merges every configured source and serves the
+  // result from its persistent store, so this is one warm request. Older servers
+  // (rolling upgrade, or a cached PWA shell talking to one) have no merged
+  // endpoint — fall back to fetching and merging the sources here as before.
   async loadEpg() {
     const urls = epgSources(get().settings);
     if (!urls.length) {
@@ -521,6 +524,36 @@ export const useStore = create((set, get) => ({
     }
     set({ epgLoading: true });
     try {
+      const merged = await api.fetchEpgMerged();
+      // The server derives its sources from the synced settings blob. An install
+      // that configured EPG before cross-device sync existed has sources here but
+      // none there — push ours up, and serve this load the old way meanwhile.
+      if (!merged.sourceCount && urls.length) {
+        pushState('settings', get().settings);
+        await get()._loadEpgPerSource(urls);
+        return;
+      }
+      // Load the alt-name tier before publishing the guide, so the first render
+      // already resolves the channels it covers instead of a second pass.
+      setAltNameIndex(await api.epgAltNames().catch(() => ({})));
+      set({ epg: merged });
+      get()._reportEpgSourceFailures(urls.length);
+    } catch (err) {
+      // Fall back only when the endpoint isn't there (older server) or the request
+      // never reached it. Falling back on 401/429/5xx would turn one failed
+      // request into one per source.
+      const endpointMissing = err.status === 404;
+      const requestNeverLanded = !err.status;
+      if (endpointMissing || requestNeverLanded) await get()._loadEpgPerSource(urls);
+      else get().setToast(`EPG load failed: ${err.message || err}`);
+    } finally {
+      set({ epgLoading: false });
+    }
+  },
+
+  // Legacy path: fetch each source and merge client-side.
+  async _loadEpgPerSource(urls) {
+    try {
       const results = await Promise.allSettled(urls.map((u) => api.fetchEpg(u)));
       const ok = results.filter((r) => r.status === 'fulfilled').map((r) => r.value);
       const failed = results.length - ok.length;
@@ -528,9 +561,19 @@ export const useStore = create((set, get) => ({
       if (failed) get().setToast(`${failed} of ${urls.length} EPG source(s) failed to load`);
     } catch (err) {
       get().setToast(`EPG load failed: ${err.message || err}`);
-    } finally {
-      set({ epgLoading: false });
     }
+  },
+
+  // Keep the partial-failure warning the per-source path used to give, now that
+  // the server does the fetching. Non-blocking: the guide is already displayed.
+  _reportEpgSourceFailures(sourceCount) {
+    api
+      .epgHealth()
+      .then((health) => {
+        const failed = health.filter((source) => !source.ok).length;
+        if (failed) get().setToast(`${failed} of ${health.length || sourceCount} EPG source(s) failed to load`);
+      })
+      .catch(() => {});
   },
 
   // Merge & persist a partial settings patch (used by the single-Save Settings page).

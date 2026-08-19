@@ -1,9 +1,21 @@
-// Tiny JSON file persistence for playlists & recordings metadata.
+// Tiny JSON file persistence for playlists & recordings metadata, plus the
+// on-disk layout of the data volume (where raw uploaded playlists live).
 import { promises as fs } from 'fs';
 import path from 'path';
 import { randomUUID } from 'crypto';
 
 const DATA_DIR = process.env.DATA_DIR || path.join(process.cwd(), 'data');
+const PLAYLIST_DIR = path.join(DATA_DIR, 'playlists');
+// A playlist id may only name a file inside PLAYLIST_DIR — ids arrive from the
+// client (POST /api/playlists accepts body.id), so this is a trust boundary.
+const PLAYLIST_ID_RE = /^[a-zA-Z0-9-]+$/;
+
+// Absolute path of a playlist's stored raw .m3u, or null when the id could
+// escape PLAYLIST_DIR. Every reader and writer of those files goes through here.
+export function playlistFilePath(id) {
+  if (!PLAYLIST_ID_RE.test(id)) return null;
+  return path.join(PLAYLIST_DIR, `${id}.m3u`);
+}
 
 async function ensureDir() {
   await fs.mkdir(DATA_DIR, { recursive: true });
@@ -51,17 +63,40 @@ async function readRaw(name) {
   }
 }
 
+// Suffix of a not-yet-renamed write. Shared so a janitor can recognise one that a
+// process died before finishing.
+export const TMP_SUFFIX = '.tmp';
+
+/**
+ * Write a file so readers only ever see the complete version: a uniquely-named
+ * temp alongside it, then a rename. Unique because concurrent writers to the same
+ * path must not share a temp (a previous shared "<file>.tmp" raced on rename).
+ */
+export async function writeFileAtomic(filePath, data) {
+  const tmp = `${filePath}.${randomUUID()}${TMP_SUFFIX}`;
+  await fs.writeFile(tmp, data);
+  await fs.rename(tmp, filePath);
+}
+
 async function writeRaw(name, data) {
   await ensureDir();
-  const tmp = `${fileFor(name)}.${randomUUID()}.tmp`; // unique → no cross-write race
-  await fs.writeFile(tmp, JSON.stringify(data, null, 2), 'utf8');
-  await fs.rename(tmp, fileFor(name));
+  await writeFileAtomic(fileFor(name), JSON.stringify(data, null, 2));
   return data;
 }
 
 export async function readCollection(name) {
   await ensureDir();
   return readRaw(name);
+}
+
+// When a collection last changed on disk (ms), or 0 if it has never been written.
+// Lets a derived cache decide whether it was built before or after its source.
+export async function collectionChangedAt(name) {
+  try {
+    return (await fs.stat(fileFor(name))).mtimeMs;
+  } catch {
+    return 0;
+  }
 }
 
 export function writeCollection(name, data) {
@@ -80,4 +115,4 @@ export function updateCollection(name, mutator) {
   });
 }
 
-export { DATA_DIR };
+export { DATA_DIR, PLAYLIST_DIR };

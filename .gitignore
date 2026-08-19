@@ -11,3 +11,10 @@ docs/
 
 # Local editor/agent tooling (not part of the project)
 .claude/
+
+# Local operator runbook (never publish)
+build and push.md
+
+# Internal planning/scan docs (kept local, like Security.md)
+EPG.md
+SCAN_NOTES.md

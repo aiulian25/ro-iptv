@@ -6,13 +6,32 @@ import compression from 'compression';
 import { promises as fs } from 'fs';
 import { createReadStream } from 'fs';
 import path from 'path';
-import zlib from 'zlib';
 import { fileURLToPath } from 'url';
 import { randomUUID } from 'crypto';
 
 import { parseM3U } from './lib/m3u.js';
-import { parseEPG } from './lib/epg.js';
-import { readCollection, writeCollection, updateCollection, DATA_DIR } from './lib/store.js';
+import {
+  readCollection,
+  writeCollection,
+  updateCollection,
+  playlistFilePath,
+  DATA_DIR,
+  PLAYLIST_DIR,
+} from './lib/store.js';
+import { FETCH_HEADERS, isValidUrl, isBlockedTarget, guardedFetch } from './lib/http.js';
+import { getWantedChannels, markWantedChannelsDirty } from './lib/channels.js';
+import { suggestionsForCountries } from './lib/epgsources.js';
+import { matchGuideToChannels, matchAll, buildAltNameIndex } from './lib/epgmatch.js';
+import { loadIptvOrgIndex, warmIptvOrgDataset } from './lib/iptvorg.js';
+import { probeNowPlaying } from './lib/icy.js';
+import { generateChannelsXml, ensureChannelsXmlExists, readSidecarSummary } from './lib/channelsxml.js';
+import {
+  fetchAndParseGuide,
+  getMergedGuide,
+  configuredEpgUrls,
+  refreshAll,
+  readSourceHealth,
+} from './lib/epgstore.js';
 import {
   COOKIE,
   REMEMBER_DAYS,
@@ -61,9 +80,10 @@ app.use(
         frameAncestors: ["'self'"],
         formAction: ["'self'"],
         scriptSrc: ["'self'"],
-        // Inline style props (dynamic widths, floating-box geometry) + Google Fonts CSS.
-        styleSrc: ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
-        fontSrc: ["'self'", 'https://fonts.gstatic.com', 'data:'],
+        // Inline style props (dynamic widths, floating-box geometry). Fonts are
+        // served from this origin, so no third-party font host is allowed.
+        styleSrc: ["'self'", "'unsafe-inline'"],
+        fontSrc: ["'self'", 'data:'],
         // Channel / station logos load from arbitrary http(s) hosts.
         imgSrc: ["'self'", 'data:', 'blob:', 'https:', 'http:'],
         // Media is proxied (same-origin) but allow direct streams + MSE blobs.
@@ -251,6 +271,9 @@ app.use('/api', (req, res, next) => {
 // ---- Simple in-memory caches (EPG + playlist text) -----------------------
 // Bounded so a run of distinct EPG/playlist URLs can't grow memory without limit.
 const MAX_CACHE_ENTRIES = 8;
+// How long an ad-hoc /api/epg guide stays in memory. Configured sources bypass
+// this entirely — they are served from the persistent store in lib/epgstore.js.
+const EPG_MEMORY_CACHE_TTL_MS = 15 * 60 * 1000;
 const cache = new Map();
 function cacheGet(key, ttlMs) {
   const hit = cache.get(key);
@@ -265,11 +288,6 @@ function cacheSet(key, value) {
   }
 }
 
-const FETCH_HEADERS = {
-  'User-Agent': 'Mozilla/5.0 (RO-IPTV; +https://github.com/ro-iptv) AppleWebKit/537.36',
-  Accept: '*/*',
-};
-
 // Some streams only respond to a specific User-Agent / Referer (carried in the
 // playlist via tvg attributes or #EXTVLCOPT). Sanitize caller-supplied values
 // (strip CR/LF to block header injection, cap length) before forwarding.
@@ -282,44 +300,11 @@ function proxyExtra(ua, ref) {
   return (ua ? `&ua=${encodeURIComponent(ua)}` : '') + (ref ? `&ref=${encodeURIComponent(ref)}` : '');
 }
 
-function isValidUrl(u) {
-  try {
-    const url = new URL(u);
-    return url.protocol === 'http:' || url.protocol === 'https:';
-  } catch {
-    return false;
-  }
-}
-
-// Opt-in SSRF hardening for the upstream-fetching endpoints (proxy/playlist/epg).
-// This is a LITERAL-address check: a hostname that DNS-resolves to a private IP is
-// NOT caught (full protection needs resolve-and-pin, which is out of scope here).
-const BLOCK_PRIVATE = process.env.PROXY_BLOCK_PRIVATE === '1';
-
-function isPrivateHost(hostname) {
-  const h = hostname.toLowerCase().replace(/^\[|\]$/g, '');
-  if (h === 'localhost' || h.endsWith('.localhost') || h.endsWith('.local') || h.endsWith('.internal')) return true;
-  const v4 = h.match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
-  if (v4) {
-    const [a, b] = [+v4[1], +v4[2]];
-    return (
-      a === 10 ||
-      a === 127 ||
-      a === 0 ||
-      (a === 172 && b >= 16 && b <= 31) ||
-      (a === 192 && b === 168) ||
-      (a === 169 && b === 254) ||
-      (a === 100 && b >= 64 && b <= 127)
-    );
-  }
-  if (h === '::1' || h.startsWith('fc') || h.startsWith('fd') || h.startsWith('fe80')) return true;
-  return false;
-}
-
-// Refuse literal private/loopback/link-local targets when PROXY_BLOCK_PRIVATE=1.
+// Refuse literal private/loopback/link-local targets when PROXY_BLOCK_PRIVATE=1
+// (the predicate itself lives in lib/http.js so background fetches share it).
 // Returns false (after sending the 403) when the request should stop.
 function guardTarget(target, res) {
-  if (BLOCK_PRIVATE && isPrivateHost(new URL(target).hostname)) {
+  if (isBlockedTarget(target)) {
     res.status(403).json({ error: 'Refusing to fetch a private-network URL' });
     return false;
   }
@@ -328,7 +313,7 @@ function guardTarget(target, res) {
 
 // ---- Health --------------------------------------------------------------
 app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok', time: new Date().toISOString(), version: '1.1.0' });
+  res.json({ status: 'ok', time: new Date().toISOString(), version: '1.2.0' });
 });
 
 // ---- CORS / stream proxy -------------------------------------------------
@@ -348,11 +333,13 @@ app.all('/api/proxy', async (req, res) => {
     if (ref) headers.Referer = ref;
     if (req.headers.range) headers.Range = req.headers.range;
 
-    const upstream = await fetch(target, {
+    const upstream = await guardedFetch(target, {
       method: req.method === 'HEAD' ? 'HEAD' : 'GET',
       headers,
-      redirect: 'follow',
     });
+    // Where the response actually came from: a stream that redirects must have
+    // its manifest resolved against the final URL, not the one we asked for.
+    const finalUrl = upstream.url || target;
 
     res.status(upstream.status);
     const passthrough = ['content-type', 'content-length', 'content-range', 'accept-ranges', 'cache-control'];
@@ -364,9 +351,9 @@ app.all('/api/proxy', async (req, res) => {
 
     const contentType = upstream.headers.get('content-type') || '';
     // Rewrite HLS manifests so nested segment/playlist URLs also flow through the proxy.
-    if (/mpegurl|m3u8/i.test(contentType) || /\.m3u8(\?|$)/i.test(target)) {
+    if (/mpegurl|m3u8/i.test(contentType) || /\.m3u8(\?|$)/i.test(finalUrl)) {
       const text = await upstream.text();
-      const rewritten = rewriteManifest(text, target, proxyExtra(ua, ref));
+      const rewritten = rewriteManifest(text, finalUrl, proxyExtra(ua, ref));
       res.setHeader('content-type', 'application/vnd.apple.mpegurl');
       res.removeHeader('content-length');
       return res.send(rewritten);
@@ -420,7 +407,7 @@ app.get('/api/playlist', upstreamLimiter, async (req, res) => {
     const cached = cacheGet(`pl:${target}`, 60 * 1000);
     let text = cached;
     if (!text) {
-      const upstream = await fetch(target, { headers: FETCH_HEADERS, redirect: 'follow' });
+      const upstream = await guardedFetch(target, { headers: FETCH_HEADERS });
       if (!upstream.ok) return res.status(upstream.status).json({ error: `Upstream ${upstream.status}` });
       text = await upstream.text();
       cacheSet(`pl:${target}`, text);
@@ -443,20 +430,71 @@ app.post('/api/parse', upstreamLimiter, (req, res) => {
   res.json({ count: channels.length, channels, fetchedAt: new Date().toISOString() });
 });
 
-// ---- EPG fetch + parse ---------------------------------------------------
-// Accepts plain XMLTV and gzip-compressed guides (iptv-org/epg `--gzip` output,
-// commonly served as .xml.gz). Guards against oversized downloads / zip bombs.
-const EPG_MAX_DOWNLOAD = 200 * 1024 * 1024; // 200 MB compressed
-const EPG_MAX_DECOMPRESSED = 600 * 1024 * 1024; // 600 MB after gunzip
+// ---- EPG -----------------------------------------------------------------
+// Fetching, parsing, persistence and merging live in lib/epgstore.js. What stays
+// here is the request-shaped part: clamping the requested window and serving it.
 const MS_PER_HOUR = 3600_000;
-const EPG_MAX_WINDOW_HOURS = 168; // 7 days — ceiling on the client-requested window
-const EPG_WINDOW_LOOKBACK_HOURS = 3; // include recently-finished programmes (Now context)
+const EPG_MAX_WINDOW_HOURS = 168; // 7 days — ceiling on both window directions
+const EPG_WINDOW_LOOKBACK_HOURS = 3; // legacy /api/epg default: Now context only
+// Catchup browses up to `catchup-days` back, so the merged guide keeps a week.
+const EPG_MERGED_LOOKBACK_HOURS = 168;
+const EPG_MERGED_FORWARD_HOURS = 48;
+// Background refresh cadence, from the same REFRESH_INTERVAL_MINUTES knob the
+// client uses for playlists. 0 disables it (as .env.example documents); anything
+// lower than the floor is raised to it so guides are never hammered.
+const EPG_REFRESH_MIN_MINUTES = 15;
+// A validation runs while the user waits on a button, so it gets the short budget
+// rather than the background fetcher's.
+const EPG_VALIDATE_TIMEOUT_MS = 20_000;
+// The iptv-org grabber running alongside this app, if the optional overlay is up.
+const EPG_SIDECAR_URL = process.env.EPG_SIDECAR_URL || '';
+// Rebuilding channels.xml re-reads the iptv-org dataset, so collapse a burst of
+// playlist edits into one run.
+const SIDECAR_REGEN_DEBOUNCE_MS = 15_000;
+// The iptv-org dataset itself only changes slowly; a daily rebuild keeps the
+// mapping current without re-reading 36 MB of JSON more often than that.
+const SIDECAR_REGEN_INTERVAL_MS = 24 * 60 * 60 * 1000;
+let sidecarRegenTimer = null;
+
+// Keep the sidecar's channel list in step with the playlists it is derived from.
+// Only meaningful when a sidecar is configured — otherwise nothing consumes it.
+function scheduleSidecarRegen() {
+  if (!EPG_SIDECAR_URL) return;
+  clearTimeout(sidecarRegenTimer);
+  sidecarRegenTimer = setTimeout(() => {
+    regenerateSidecarChannels().catch((err) => console.warn('epg-sidecar: regen failed:', String(err)));
+  }, SIDECAR_REGEN_DEBOUNCE_MS);
+  sidecarRegenTimer.unref?.();
+}
+
+async function regenerateSidecarChannels() {
+  const summary = await generateChannelsXml(await getWantedChannels());
+  console.log(`epg-sidecar: channels.xml → ${summary.mapped}/${summary.total} channels mapped`);
+  return summary;
+}
+// Enough unmatched names to show the user what a guide is missing, not the list.
+const MAX_UNMATCHED_SAMPLE = 8;
+// The coverage card lists unmatched channels to fix by hand; past this many the
+// list stops being a to-do list and the response stops being small.
+const MAX_UNMATCHED_PER_GROUP = 200;
+
+function epgRefreshIntervalMs() {
+  const minutes = parseInt(process.env.REFRESH_INTERVAL_MINUTES || '360', 10);
+  if (!Number.isFinite(minutes) || minutes <= 0) return 0;
+  return Math.max(EPG_REFRESH_MIN_MINUTES, minutes) * 60_000;
+}
+
+function clampWindowHours(value, fallback) {
+  const hours = parseInt(value, 10);
+  if (!Number.isFinite(hours) || hours <= 0) return fallback;
+  return Math.min(EPG_MAX_WINDOW_HOURS, hours);
+}
 
 // Return a windowed shallow copy of a parsed guide: only programmes overlapping
 // [now − lookback, now + hours]. `channels` is kept whole (F13 needs the full map);
 // channels with no programmes left in the window are dropped from `programmes`.
-function windowEpg(parsed, hours) {
-  const from = Date.now() - EPG_WINDOW_LOOKBACK_HOURS * MS_PER_HOUR;
+function windowEpg(parsed, hours, lookbackHours = EPG_WINDOW_LOOKBACK_HOURS) {
+  const from = Date.now() - lookbackHours * MS_PER_HOUR;
   const to = Date.now() + hours * MS_PER_HOUR;
   const programmes = {};
   for (const [id, list] of Object.entries(parsed.programmes || {})) {
@@ -466,36 +504,226 @@ function windowEpg(parsed, hours) {
   return { channels: parsed.channels, programmes };
 }
 
+// Single-source fetch. Kept for ad-hoc guide URLs and as the client's fallback
+// when it talks to a server without /api/epg/merged. Results stay in the shared
+// memory cache only — arbitrary URLs are never persisted to the data volume.
 app.get('/api/epg', upstreamLimiter, async (req, res) => {
   const target = req.query.url;
   if (!isValidUrl(target)) return res.status(400).json({ error: 'Invalid or missing url parameter' });
   if (!guardTarget(target, res)) return;
   const hours = Math.min(EPG_MAX_WINDOW_HOURS, parseInt(req.query.hours, 10) || 0);
+  const lookbackHours = clampWindowHours(req.query.lookbackHours, EPG_WINDOW_LOOKBACK_HOURS);
   try {
-    let parsed = cacheGet(`epg:${target}`, 15 * 60 * 1000);
+    let parsed = cacheGet(`epg:${target}`, EPG_MEMORY_CACHE_TTL_MS);
     if (!parsed) {
-      const upstream = await fetch(target, { headers: FETCH_HEADERS, redirect: 'follow' });
-      if (!upstream.ok) return res.status(upstream.status).json({ error: `Upstream ${upstream.status}` });
-
-      const buf = Buffer.from(await upstream.arrayBuffer());
-      if (buf.length > EPG_MAX_DOWNLOAD) return res.status(413).json({ error: 'EPG file too large' });
-
-      // gzip magic bytes (1f 8b) → a .xml.gz guide; otherwise treat as plain XML.
-      let xml;
-      if (buf.length > 2 && buf[0] === 0x1f && buf[1] === 0x8b) {
-        xml = zlib.gunzipSync(buf, { maxOutputLength: EPG_MAX_DECOMPRESSED }).toString('utf8');
-      } else {
-        xml = buf.toString('utf8');
-      }
-
-      // Cache the FULL parsed guide; windowing happens per-request below.
-      parsed = parseEPG(xml);
+      parsed = await fetchAndParseGuide(target);
       cacheSet(`epg:${target}`, parsed);
     }
-
-    res.json(hours > 0 ? windowEpg(parsed, hours) : parsed);
+    res.json(hours > 0 ? windowEpg(parsed, hours, lookbackHours) : parsed);
   } catch (err) {
+    // Preserve the pre-existing contract: the upstream's own status (and the 413
+    // for an oversized guide) reach the client rather than a blanket 502.
+    if (err.status === 413) return res.status(413).json({ error: 'EPG file too large' });
+    if (err.status) return res.status(err.status).json({ error: `Upstream ${err.status}` });
     res.status(502).json({ error: 'Failed to fetch EPG', detail: String(err) });
+  }
+});
+
+// The whole guide: every configured source, merged and windowed. Served from the
+// disk-backed store, so it is warm at first paint and after a restart. The window
+// defaults to a week back / two days forward so Catchup sees its full archive.
+app.get('/api/epg/merged', upstreamLimiter, async (req, res) => {
+  const hours = clampWindowHours(req.query.hours, EPG_MERGED_FORWARD_HOURS);
+  const lookbackHours = clampWindowHours(req.query.lookbackHours, EPG_MERGED_LOOKBACK_HOURS);
+  try {
+    const guide = await getMergedGuide();
+    // sourceCount lets the client tell "the server has no sources configured"
+    // apart from "the sources produced nothing", and re-sync its own list if the
+    // two ever disagree.
+    const sourceCount = (await configuredEpgUrls()).length;
+    res.json({ ...windowEpg(guide, hours, lookbackHours), sourceCount });
+  } catch (err) {
+    res.status(502).json({ error: 'Failed to load EPG', detail: String(err) });
+  }
+});
+
+// Known public guides for the countries this install actually has. Pure lookup —
+// no upstream traffic; validating a candidate is the separate call below.
+app.get('/api/epg/suggest', upstreamLimiter, async (req, res) => {
+  try {
+    const { countries } = await getWantedChannels();
+    res.json(suggestionsForCountries(countries));
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to build suggestions', detail: String(err) });
+  }
+});
+
+// Try a guide URL before committing to it: download, parse, and report how much
+// of the user's channel set it covers. Nothing is persisted — a candidate the
+// user rejects leaves no trace on the data volume.
+app.post('/api/epg/validate', upstreamLimiter, async (req, res) => {
+  const url = (req.body && req.body.url) || '';
+  const country = (req.body && req.body.country) || '';
+  if (!isValidUrl(url)) return res.status(400).json({ ok: false, error: 'Enter a valid http(s) URL' });
+  if (!guardTarget(url, res)) return;
+  try {
+    let guide = cacheGet(`epg:${url}`, EPG_MEMORY_CACHE_TTL_MS);
+    if (!guide) {
+      guide = await fetchAndParseGuide(url, { timeoutMs: EPG_VALIDATE_TIMEOUT_MS });
+      cacheSet(`epg:${url}`, guide);
+    }
+    const { channels } = await getWantedChannels();
+    const scope = country ? channels.filter((channel) => channel.country === country) : channels;
+    const { matched, total, unmatched } = matchGuideToChannels(guide, scope);
+    res.json({
+      ok: true,
+      channelCount: Object.keys(guide.channels || {}).length,
+      matched,
+      total,
+      sampleUnmatched: unmatched.slice(0, MAX_UNMATCHED_SAMPLE),
+    });
+  } catch (err) {
+    res.json({ ok: false, error: String(err.message || err) });
+  }
+});
+
+// How much of the user's channel set the guide actually resolves, grouped by
+// country and by playlist, with the channels that missed named so they can be
+// linked by hand. Memoized against the guide and the channel index, so opening
+// Settings repeatedly costs nothing.
+let coverageCache = null;
+
+// The alt-name tier arriving changes the answer, but nothing else about the guide
+// or the channel set does — so the memo has to be dropped explicitly once a warm
+// lands, or coverage would keep reporting the pre-dataset numbers.
+function warmDatasetThenRecompute(countries) {
+  warmIptvOrgDataset(countries).then((loaded) => {
+    if (loaded) coverageCache = null;
+  });
+}
+
+async function computeCoverage() {
+  const wanted = await getWantedChannels();
+  const guide = await getMergedGuide();
+  const signature = `${wanted.updatedAt}|${Object.keys(guide.channels || {}).length}|${Object.keys(guide.programmes || {}).length}`;
+  const overrides = await readEpgOverrides();
+  const overridesSignature = JSON.stringify(overrides);
+  if (coverageCache && coverageCache.signature === signature && coverageCache.overrides === overridesSignature) {
+    return coverageCache.value;
+  }
+
+  const dataset = await loadIptvOrgIndex(wanted.countries, { cachedOnly: true });
+  if (!dataset && wanted.countries.length) warmDatasetThenRecompute(wanted.countries);
+  const altNames = buildAltNameIndex(dataset, guide);
+  const results = matchAll(wanted.channels, guide, overrides, altNames);
+
+  const value = {
+    generatedAt: new Date().toISOString(),
+    altNamesAvailable: !!dataset,
+    byCountry: groupCoverage(results, (result) => result.country),
+    byPlaylist: groupCoverage(results, (result) => result.playlistId),
+  };
+  coverageCache = { signature, overrides: overridesSignature, value };
+  return value;
+}
+
+// One row per group: how many matched, and which channels did not.
+function groupCoverage(results, keyOf) {
+  const groups = new Map();
+  for (const result of results) {
+    const key = keyOf(result);
+    if (!groups.has(key)) groups.set(key, { key, total: 0, matched: 0, unmatched: [] });
+    const group = groups.get(key);
+    group.total += 1;
+    if (result.matchedKey) group.matched += 1;
+    else if (group.unmatched.length < MAX_UNMATCHED_PER_GROUP) {
+      group.unmatched.push({ id: result.channelId, name: result.name, tvgId: result.tvgId });
+    }
+  }
+  return [...groups.values()]
+    .map((group) => ({ ...group, pct: group.total ? Math.round((group.matched / group.total) * 100) : 0 }))
+    .sort((a, b) => a.pct - b.pct || a.key.localeCompare(b.key));
+}
+
+async function readEpgOverrides() {
+  const state = await readCollection('state');
+  const settings = state.find((entry) => entry.key === SETTINGS_KEY)?.value || {};
+  return settings.epgOverrides && typeof settings.epgOverrides === 'object' ? settings.epgOverrides : {};
+}
+
+app.get('/api/epg/coverage', async (req, res) => {
+  try {
+    res.json(await computeCoverage());
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to compute coverage', detail: String(err) });
+  }
+});
+
+// The alt-name tier as a flat map the client can apply while resolving channels.
+// Served only from an already-cached dataset: this is on the page-load path, so
+// it must never pay for the download — a warm runs in the background instead.
+app.get('/api/epg/altnames', async (req, res) => {
+  try {
+    const wanted = await getWantedChannels();
+    const dataset = await loadIptvOrgIndex(wanted.countries, { cachedOnly: true });
+    if (!dataset) {
+      if (wanted.countries.length) warmDatasetThenRecompute(wanted.countries);
+      return res.json({});
+    }
+    res.json(buildAltNameIndex(dataset, await getMergedGuide()));
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to build alt-name index', detail: String(err) });
+  }
+});
+
+// The optional iptv-org sidecar: what the generated channels.xml covers, and
+// whether the grabber that consumes it is actually serving a guide.
+app.get('/api/epg/sidecar', async (req, res) => {
+  try {
+    const summary = await readSidecarSummary();
+    const health = (await readSourceHealth()).find((source) => source.url === EPG_SIDECAR_URL);
+    res.json({
+      configured: !!EPG_SIDECAR_URL,
+      url: EPG_SIDECAR_URL,
+      live: !!(health && health.ok),
+      error: health && !health.ok ? health.error : '',
+      summary,
+    });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to read sidecar status', detail: String(err) });
+  }
+});
+
+// Per-source status of the last refresh — which guides loaded, which failed and why.
+app.get('/api/epg/health', async (req, res) => {
+  res.json(await readSourceHealth());
+});
+
+// What a radio stream is playing right now, straight from the stream. Stations
+// rarely appear in an XMLTV guide, but most announce the current track over ICY.
+// Best-effort by nature: a station that says nothing answers with empty fields
+// rather than an error, so a polling client never has to treat silence as broken.
+app.get('/api/nowplaying', upstreamLimiter, async (req, res) => {
+  const target = req.query.url;
+  if (!isValidUrl(target)) return res.status(400).json({ error: 'Invalid or missing url parameter' });
+  if (!guardTarget(target, res)) return;
+  try {
+    res.json(await probeNowPlaying(target, cleanHeader(req.query.ua)));
+  } catch (err) {
+    res.json({ title: '', name: '', bitrate: '', genre: '', error: String(err.message || err) });
+  }
+});
+
+// ---- Wanted-channels index ----------------------------------------------
+// The channels this install actually has (enabled playlists only), with the
+// countries they fall into — the scope every EPG feature filters by. Served from
+// a memoized, disk-backed index; `?refresh=1` forces a rebuild. Rate-limited with
+// the upstream limiter because a rebuild re-fetches URL playlists.
+app.get('/api/epg/channels', upstreamLimiter, async (req, res) => {
+  try {
+    res.json(await getWantedChannels({ refresh: req.query.refresh === '1' }));
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to build channel index', detail: String(err) });
   }
 });
 
@@ -524,17 +752,13 @@ app.post('/api/playlists', writeLimiter, async (req, res) => {
       else list.push(record);
       return list;
     });
+    markWantedChannelsDirty();
+    scheduleSidecarRegen();
     res.json(record);
   } catch (err) {
     res.status(500).json({ error: 'Failed to save playlist', detail: String(err) });
   }
 });
-
-const PLAYLIST_DIR = path.join(DATA_DIR, 'playlists');
-function playlistFilePath(id) {
-  if (!/^[a-zA-Z0-9-]+$/.test(id)) return null; // guard against traversal
-  return path.join(PLAYLIST_DIR, `${id}.m3u`);
-}
 
 // Store the raw uploaded .m3u so the user can download the original later.
 app.put('/api/playlists/:id/file', writeLimiter, async (req, res) => {
@@ -552,6 +776,8 @@ app.put('/api/playlists/:id/file', writeLimiter, async (req, res) => {
       if (i >= 0) list[i].hasFile = true;
       return list;
     });
+    markWantedChannelsDirty();
+    scheduleSidecarRegen();
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: 'Failed to store file', detail: String(err) });
@@ -581,6 +807,8 @@ app.delete('/api/playlists/:id', writeLimiter, async (req, res) => {
     await updateCollection('playlists', (list) => list.filter((p) => p.id !== req.params.id));
     const fp = playlistFilePath(req.params.id);
     if (fp) await fs.unlink(fp).catch(() => {});
+    markWantedChannelsDirty();
+    scheduleSidecarRegen();
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: 'Failed to delete playlist', detail: String(err) });
@@ -591,7 +819,19 @@ app.delete('/api/playlists/:id', writeLimiter, async (req, res) => {
 // A generic key→value collection so per-origin localStorage follows the user to
 // any device pointed at this backend, the same way playlists already do.
 const SYNCED_STATE_KEYS = ['favourites', 'history', 'settings'];
+const SETTINGS_KEY = 'settings';
 const MAX_STATE_BYTES = 256 * 1024;
+// Collapse a burst of settings saves into one guide refresh.
+const EPG_REFRESH_DEBOUNCE_MS = 5000;
+let epgRefreshTimer = null;
+
+function scheduleEpgRefresh() {
+  clearTimeout(epgRefreshTimer);
+  epgRefreshTimer = setTimeout(() => {
+    refreshAll().catch((err) => console.warn('epg: refresh failed:', String(err)));
+  }, EPG_REFRESH_DEBOUNCE_MS);
+  epgRefreshTimer.unref?.();
+}
 
 app.get('/api/state', async (req, res) => {
   res.json(await readCollection('state'));
@@ -610,6 +850,9 @@ app.put('/api/state/:key', writeLimiter, async (req, res) => {
     else list.push(rec);
     return list;
   });
+  // The EPG source list lives in the settings blob — pick up edits to it without
+  // waiting for the next scheduled refresh.
+  if (key === SETTINGS_KEY) scheduleEpgRefresh();
   res.json(rec);
 });
 
@@ -978,6 +1221,39 @@ app.listen(PORT, '0.0.0.0', async () => {
   }
   await reconcileRecordings().catch(() => {});
   setInterval(() => tickScheduler().catch(() => {}), 30000);
+
+  // Keep the guide warm in the background so it no longer depends on a browser
+  // tab being open. At boot only genuinely stale sources are re-downloaded, so a
+  // container restart doesn't re-fetch guides the data volume already holds.
+  // With refresh disabled nothing is fetched here at all — a guide is then only
+  // downloaded on demand, the first time a client asks for one.
+  const epgIntervalMs = epgRefreshIntervalMs();
+  if (epgIntervalMs) {
+    refreshAll({ maxAgeMs: epgIntervalMs }).catch((err) => console.warn('epg: initial refresh failed:', String(err)));
+    setInterval(() => refreshAll().catch(() => {}), epgIntervalMs);
+  } else {
+    console.log('EPG background refresh disabled (REFRESH_INTERVAL_MINUTES=0)');
+  }
+
+  // Build the alt-name index up front when its dataset is already on the volume,
+  // so the first page load after a restart doesn't pay to parse it.
+  getWantedChannels()
+    .then((wanted) => wanted.countries.length && loadIptvOrgIndex(wanted.countries, { cachedOnly: true }))
+    .catch(() => {});
+
+  // Keep the sidecar's channel list current: once at boot and daily, so a guide
+  // for a channel added months ago is still grabbed after the dataset moves on.
+  if (EPG_SIDECAR_URL) {
+    console.log(`EPG sidecar configured: ${EPG_SIDECAR_URL}`);
+    // Before anything else: the grabber container mounts this file, and a mount
+    // of a missing path stops it starting at all.
+    await ensureChannelsXmlExists().catch((err) => console.warn('epg-sidecar:', String(err)));
+    regenerateSidecarChannels().catch((err) => console.warn('epg-sidecar: initial regen failed:', String(err)));
+    setInterval(
+      () => regenerateSidecarChannels().catch((err) => console.warn('epg-sidecar: regen failed:', String(err))),
+      SIDECAR_REGEN_INTERVAL_MS
+    );
+  }
 });
 
 // Finalise active captures gracefully on shutdown so MP4s aren't corrupted.

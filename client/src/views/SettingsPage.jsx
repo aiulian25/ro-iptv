@@ -2,10 +2,12 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useStore, selectCountries, epgSources } from '../store/useStore';
 import { countryFlag, countryName } from '../lib/country';
 import { channelsToM3U, downloadText } from '../lib/exportM3U';
-import { playlistDownloadUrl } from '../lib/api';
+import { api, playlistDownloadUrl } from '../lib/api';
 import Icon from '../components/Icon';
 import ConfirmButton from '../components/ConfirmButton';
 import PasswordSettings from '../components/PasswordSettings';
+import EpgSuggestions, { MatchSummary } from '../components/EpgSuggestions';
+import EpgCoverage from '../components/EpgCoverage';
 
 function loadChannels(id) {
   try {
@@ -75,17 +77,38 @@ export default function SettingsPage() {
   const [addUrl, setAddUrl] = useState('');
   const [addName, setAddName] = useState('');
   const [epgInput, setEpgInput] = useState('');
+  const [epgCheck, setEpgCheck] = useState(null);
+  const [epgChecking, setEpgChecking] = useState(false);
   const fileRef = useRef(null);
 
   const setField = (k, v) => setDraft((d) => ({ ...d, [k]: v }));
 
-  const addEpgSource = () => {
-    const u = epgInput.trim();
+  const addEpgSource = (url) => {
+    const u = (url ?? epgInput).trim();
     if (!u || draft.epgUrls.includes(u)) return;
     setField('epgUrls', [...draft.epgUrls, u]);
-    setEpgInput('');
+    if (url === undefined) setEpgInput('');
+    setEpgCheck(null);
   };
   const removeEpgSource = (u) => setField('epgUrls', draft.epgUrls.filter((x) => x !== u));
+
+  // Check a pasted URL the same way a suggested one is checked, so a typo or a
+  // guide that covers nothing shows up here rather than in the Live EPG panel
+  // hours later. The source is still addable either way — a guide for channels
+  // not added yet is legitimate.
+  const checkEpgSource = async () => {
+    const u = epgInput.trim();
+    if (!u) return;
+    setEpgChecking(true);
+    setEpgCheck(null);
+    try {
+      setEpgCheck(await api.validateEpg(u));
+    } catch (err) {
+      setEpgCheck({ ok: false, error: err.message || String(err) });
+    } finally {
+      setEpgChecking(false);
+    }
+  };
 
   const dirty =
     JSON.stringify(draft.epgUrls) !== JSON.stringify(committed.epgUrls) ||
@@ -286,23 +309,41 @@ export default function SettingsPage() {
               (e.g. self-host → <code>http://your-host:3000/guide.xml</code>).
             </p>
 
-            <div className="flex gap-2 mb-3">
+            <EpgSuggestions epgUrls={draft.epgUrls} onAdd={addEpgSource} />
+
+            <div className="flex flex-wrap gap-2 mb-1">
               <label className="sr-only" htmlFor="epg-url">EPG guide URL</label>
               <input
                 id="epg-url"
                 value={epgInput}
-                onChange={(e) => setEpgInput(e.target.value)}
+                onChange={(e) => {
+                  setEpgInput(e.target.value);
+                  setEpgCheck(null);
+                }}
                 onKeyDown={(e) => e.key === 'Enter' && (e.preventDefault(), addEpgSource())}
                 placeholder="https://example.com/guide.xml.gz"
                 className="flex-1 min-w-0 glass rounded-xl px-4 py-3 outline-none focus:ring-1 focus:ring-primary"
               />
               <button
-                onClick={addEpgSource}
+                onClick={checkEpgSource}
+                disabled={epgChecking || !epgInput.trim()}
+                className="glass px-5 py-3 rounded-xl font-medium hover:bg-white/10 transition-colors disabled:opacity-50"
+              >
+                {epgChecking ? 'Checking…' : 'Check'}
+              </button>
+              <button
+                onClick={() => addEpgSource()}
                 className="bg-primary text-on-primary px-5 rounded-xl font-medium hover:scale-105 transition-transform"
               >
                 Add
               </button>
             </div>
+            {epgCheck && (
+              <div className="mb-3">
+                <MatchSummary result={epgCheck} />
+              </div>
+            )}
+            {!epgCheck && <div className="mb-3" />}
 
             {draft.epgUrls.length === 0 ? (
               <p className="text-sm text-on-surface-variant">No EPG sources yet.</p>
@@ -324,6 +365,8 @@ export default function SettingsPage() {
               </ul>
             )}
           </div>
+
+          <EpgCoverage />
 
           <div>
             <h2 className="text-lg font-semibold text-primary mb-1">Default country for Live TV</h2>

@@ -22,7 +22,9 @@ async function jsonFetch(url, opts) {
     } catch {
       /* ignore */
     }
-    throw new Error(detail || `Request failed: ${res.status}`);
+    // Carry the status so callers can distinguish "endpoint absent" from
+    // "rate limited" / "upstream failed" instead of retrying blindly.
+    throw Object.assign(new Error(detail || `Request failed: ${res.status}`), { status: res.status });
   }
   return res.json();
 }
@@ -73,6 +75,32 @@ export const api = {
     }),
 
   fetchEpg: (url) => jsonFetch(`${BASE}/api/epg?url=${encodeURIComponent(url)}&hours=48`),
+  // The whole guide, merged server-side from every configured source. Windowed a
+  // week back so Catchup sees its archive, two days forward for Now/Next.
+  fetchEpgMerged: () => jsonFetch(`${BASE}/api/epg/merged?hours=48&lookbackHours=168`),
+  // Per-source status of the server's last guide refresh.
+  epgHealth: () => jsonFetch(`${BASE}/api/epg/health`),
+  // Known public guides for the countries this install has channels in.
+  suggestEpg: () => jsonFetch(`${BASE}/api/epg/suggest`),
+  // Status of the optional iptv-org sidecar and its generated channel list.
+  epgSidecar: () => jsonFetch(`${BASE}/api/epg/sidecar`),
+  // How much of the channel set the guide resolves, by country and playlist.
+  epgCoverage: () => jsonFetch(`${BASE}/api/epg/coverage`),
+  // Alternative channel names the guide answers to (normalized name → xmltv id).
+  epgAltNames: () => jsonFetch(`${BASE}/api/epg/altnames`),
+  // What a radio stream reports it is playing (ICY). Optional per-channel UA,
+  // because some stations only answer the agent named in the playlist.
+  nowPlaying: (url, userAgent = '') =>
+    jsonFetch(
+      `${BASE}/api/nowplaying?url=${encodeURIComponent(url)}${userAgent ? `&ua=${encodeURIComponent(userAgent)}` : ''}`
+    ),
+  // Try a guide before adding it: how many of your channels does it cover?
+  validateEpg: (url, country) =>
+    jsonFetch(`${BASE}/api/epg/validate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url, country }),
+    }),
 
   // Cross-device state sync (favourites / history / settings).
   listState: () => jsonFetch(`${BASE}/api/state`),

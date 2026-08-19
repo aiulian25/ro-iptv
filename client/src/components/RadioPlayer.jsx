@@ -4,8 +4,14 @@ import { attachStream } from '../lib/playSource';
 import ChannelLogo from './ChannelLogo';
 import FavouriteButton from './FavouriteButton';
 import { useMediaSession } from '../hooks/useMediaSession';
+import { useStore } from '../store/useStore';
+import { api } from '../lib/api';
+import { programmesForChannel, findNowNext, fmtTime, progressPct } from '../lib/epg';
 
 const BAR_COUNT = 14;
+// Track changes are minutes apart; the server caches each probe for 15s, so this
+// is about how fast a change surfaces, not how hard the station is hit.
+const NOW_PLAYING_POLL_MS = 20_000;
 
 // Right-hand "Now Playing" radio panel: vinyl animation + Web Audio visualizer.
 export default function RadioPlayer({ station, onPrev, onNext, onStop }) {
@@ -16,9 +22,54 @@ export default function RadioPlayer({ station, onPrev, onNext, onStop }) {
   const [playing, setPlaying] = useState(false);
   const [volume, setVolume] = useState(0.9);
   const [error, setError] = useState(null);
+  const [nowPlaying, setNowPlaying] = useState(null);
+  const epg = useStore((s) => s.epg);
+  const epgOverrides = useStore((s) => s.settings.epgOverrides || {});
+
+  // A station can be in a guide like any other channel (Freeview publishes radio),
+  // so Now/Next comes from exactly the same matching Live TV uses.
+  const programmes = station ? programmesForChannel(epg, station, epgOverrides) : [];
+  const { now, next } = findNowNext(programmes);
+
+  // Two sources, in order of specificity: the track the stream is playing right
+  // now, then the scheduled programme. Neither is invented — when a station tells
+  // us nothing, the line simply isn't shown. Tagged with the station it came from,
+  // so switching stations can never show the previous one's track for a frame.
+  const current = nowPlaying?.url === station?.url ? nowPlaying : null;
+  const trackTitle = current?.title || '';
+  const headline = trackTitle || now?.title || station?.name || '';
+  const bitrate = current?.bitrate ? `${current.bitrate} kbps` : '';
 
   // OS media controls (lock screen / headset / car) for the playing station.
-  useMediaSession({ mediaRef: audioRef, channel: station, playing, onPrev, onNext, onStop });
+  useMediaSession({ mediaRef: audioRef, channel: station, playing, onPrev, onNext, onStop, trackTitle });
+
+  // Ask the stream what it is playing, but only while it actually is: a paused
+  // player must not keep opening connections to the station.
+  useEffect(() => {
+    if (!station || !playing) return undefined;
+    let cancelled = false;
+    const url = station.url;
+    const poll = () => {
+      api
+        .nowPlaying(url, station.httpUserAgent)
+        .then((data) => {
+          // An empty answer means "nothing new" far more often than "the music
+          // stopped" — a momentary miss must not blank a title that still stands.
+          if (!cancelled) {
+            setNowPlaying((previous) =>
+              data.title || !previous || previous.url !== url ? { ...data, url } : previous
+            );
+          }
+        })
+        .catch(() => {});
+    };
+    poll();
+    const id = setInterval(poll, NOW_PLAYING_POLL_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [station, playing]);
 
   // Load the stream when station changes.
   useEffect(() => {
@@ -117,9 +168,19 @@ export default function RadioPlayer({ station, onPrev, onNext, onStop }) {
         </div>
       </div>
 
-      <div className="text-center w-full z-10">
-        <h3 className="text-xl font-semibold text-primary truncate px-4">{station.name}</h3>
-        <p className="font-mono text-sm text-on-surface-variant">128kbps AAC</p>
+      <div className="text-center w-full z-10 px-4">
+        <h3 className="text-xl font-semibold text-primary line-clamp-2 break-words">{headline}</h3>
+        {next && (
+          <p className="text-sm text-on-surface-variant truncate mt-0.5">
+            Next: {next.title} • {fmtTime(next.start)}
+          </p>
+        )}
+        {now && (
+          <div className="mt-2 h-1 w-full max-w-xs mx-auto bg-surface-variant rounded-full overflow-hidden">
+            <div className="bg-primary h-full" style={{ width: `${progressPct(now)}%` }} />
+          </div>
+        )}
+        {bitrate && <p className="font-mono text-xs text-on-surface-variant mt-1">{bitrate}</p>}
       </div>
 
       {/* Visualizer */}

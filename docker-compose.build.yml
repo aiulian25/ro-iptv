@@ -24,7 +24,7 @@ services:
       - /tmp:size=64m,mode=1777
     # Resource ceilings to blunt DoS / runaway usage. Generous, env-overridable
     # defaults so large EPG decompression and concurrent recordings aren't starved.
-    mem_limit: ${MEM_LIMIT:-1024m}
+    mem_limit: ${MEM_LIMIT:-2g}
     cpus: ${CPU_LIMIT:-2}
     pids_limit: ${PIDS_LIMIT:-256}
     ulimits:
@@ -69,6 +69,12 @@ services:
       - RL_WRITE_MAX=${RL_WRITE_MAX:-120}
       # SSRF hardening — set 1 to block private/loopback upstream fetches:
       - PROXY_BLOCK_PRIVATE=${PROXY_BLOCK_PRIVATE:-}
+      # Points at the optional grabber below. Harmless when it is not running.
+      - EPG_SIDECAR_URL=${EPG_SIDECAR_URL:-http://epg:3000/guide.xml}
+      # A country EPG pack is ~13 MB gzipped but ~72 MB of XML, and parsing it
+      # peaks near 900 MB. Node only claims ~half the cgroup limit by default,
+      # so the ceiling is set explicitly and the limit sized to fit it.
+      - NODE_OPTIONS=--max-old-space-size=${NODE_HEAP_MB:-1536}
       - RL_LOGIN_MAX=${RL_LOGIN_MAX:-10}
     volumes:
       - data:/data
@@ -77,6 +83,54 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
+      # Without this the first probe only runs after `interval`, so anything
+      # waiting on service_healthy (the EPG sidecar) stalls or gives up.
+      start_period: 15s
+
+  epg:
+    image: ghcr.io/iptv-org/epg:master
+    # Opt-in: only starts with `docker compose --profile epg up -d`.
+    profiles: ["epg"]
+    container_name: ro-iptv-epg
+    restart: unless-stopped
+    # The channel list below is mounted from the app's volume, and a mount of a
+    # path that does not exist yet stops this container starting. The app creates
+    # the file as soon as it boots, so wait for it to be up before mounting.
+    depends_on:
+      ro-iptv:
+        condition: service_healthy
+    environment:
+      # REQUIRED. The grabber allocates several GB while it loads the iptv-org
+      # dataset, before it fetches anything; with node's default ceiling (~4 GB)
+      # it dies with "JavaScript heap out of memory" no matter how few channels
+      # are listed. Steady state afterwards is ~110 MB.
+      - NODE_OPTIONS=--max-old-space-size=${EPG_HEAP_MB:-8192}
+      # Nightly at 03:00. The grab takes a while — it scrapes one site at a time.
+      - CRON_SCHEDULE=${EPG_CRON_SCHEDULE:-0 3 * * *}
+      # How many days ahead to grab. 3 covers Now/Next plus the guide grid.
+      - DAYS=${EPG_DAYS:-3}
+      # The image default. Raising it multiplies the peak memory above.
+      - MAX_CONNECTIONS=${EPG_MAX_CONNECTIONS:-1}
+      - GZIP=true
+      # Grab once on start so a fresh stack has a guide without waiting for cron.
+      - RUN_AT_STARTUP=true
+      - TZ=${TZ:-Europe/London}
+    volumes:
+      # The app-generated channel list, mounted as the grabber's input.
+      - type: volume
+        source: data
+        target: /epg/public/channels.xml
+        volume:
+          subpath: epg/channels.xml
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 volumes:
   data:

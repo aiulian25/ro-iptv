@@ -44,11 +44,24 @@ const MS_PER_HOUR = 3_600_000;
 // "Digi 24 HD", "Digi24" and "digi-24" all collapse to "digi24".
 export function normalizeName(s) {
   return String(s || '')
+    // Playlists annotate names with resolution and status — "Agro TV (360p)
+    // [Not 24/7]" is the same channel a guide calls "Agro TV".
+    .replace(/\([^)]*\)|\[[^\]]*\]/g, '')
     .toLowerCase()
     .normalize('NFD')
     .replace(/\p{Diacritic}/gu, '')
     .replace(/\b(hd|fhd|uhd|4k|8k|sd)\b/g, '')
     .replace(/[^a-z0-9]/g, '');
+}
+
+// The ids a channel's tvg-id could be keyed under: iptv-org ids carry an optional
+// feed suffix ("Digi24.ro@SD") that most guides drop. Exact first, so a guide that
+// really does key on the feed still wins. Mirrors server/lib/epgmatch.js.
+export function channelIdCandidates(tvgId) {
+  const id = String(tvgId || '').trim();
+  if (!id) return [];
+  const base = id.split('@')[0];
+  return base && base !== id ? [id, base] : [id];
 }
 
 // An epg.channels value is `{name, icon}` (current) or a bare display-name string
@@ -57,23 +70,49 @@ function channelName(value) {
   return typeof value === 'string' ? value : value?.name || '';
 }
 
+// Normalized display name → channel id, built once per guide object. A new guide
+// is a new object, so the cache invalidates itself; without it every unmatched
+// channel rescanned the whole guide on every render of every row.
+const nameIndexCache = new WeakMap();
+
+// The alt-name tier, shared by every caller: it is one property of the loaded
+// guide, not per-component state. Set once when the guide loads (see loadEpg),
+// the same way api.js registers its unauthorized handler.
+let sharedAltNames = {};
+
+export function setAltNameIndex(index) {
+  sharedAltNames = index && typeof index === 'object' ? index : {};
+}
+
+function nameIndexFor(epg) {
+  let index = nameIndexCache.get(epg);
+  if (index) return index;
+  index = new Map();
+  for (const [id, value] of Object.entries(epg.channels || {})) {
+    const key = normalizeName(channelName(value));
+    if (key && !index.has(key)) index.set(key, id);
+  }
+  nameIndexCache.set(epg, index);
+  return index;
+}
+
 // Normalized display-name → channel id, or '' when no channel matches.
 function channelIdByName(epg, name) {
   const target = normalizeName(name);
-  if (!target) return '';
-  for (const [id, value] of Object.entries(epg.channels || {})) {
-    if (normalizeName(channelName(value)) === target) return id;
-  }
-  return '';
+  return target ? nameIndexFor(epg).get(target) || '' : '';
 }
 
 // Resolve a channel to its EPG key: explicit user override, then exact tvg-id,
-// then a normalized display-name match.
-function resolveKey(epg, channel, overrides) {
+// then a normalized display-name match, then an iptv-org alternative name (a
+// guide that calls a channel something the playlist does not).
+function resolveKey(epg, channel, overrides, altNames) {
   const override = overrides[channel.id];
   if (override) return override;
-  if (channel.tvgId && epg.programmes[channel.tvgId]) return channel.tvgId;
-  return channelIdByName(epg, channel.tvgName || channel.name);
+  const byId = channelIdCandidates(channel.tvgId).find((candidate) => epg.programmes[candidate]);
+  if (byId) return byId;
+  const normalized = normalizeName(channel.tvgName || channel.name);
+  if (!normalized) return '';
+  return nameIndexFor(epg).get(normalized) || altNames[normalized] || '';
 }
 
 // The EPG channel-icon URL for a channel (logo fallback when the playlist has no
@@ -88,9 +127,9 @@ export function epgIconFor(epg, channel) {
 
 // Build a lookup of EPG programmes for a channel: per-channel override, then
 // tvg-id, then normalized name. A channel's tvg-shift (hours) offsets the times.
-export function programmesForChannel(epg, channel, overrides = {}) {
+export function programmesForChannel(epg, channel, overrides = {}, altNames = sharedAltNames) {
   if (!epg || !channel) return [];
-  const key = resolveKey(epg, channel, overrides);
+  const key = resolveKey(epg, channel, overrides, altNames);
   const programmes = (key && epg.programmes[key]) || [];
   if (!programmes.length || !channel.tvgShift) return programmes;
   const shiftMs = channel.tvgShift * MS_PER_HOUR;

@@ -7,6 +7,7 @@ import CatchupPanel from '../components/CatchupPanel';
 import CountryGrid from '../components/CountryGrid';
 import MobilePanelBar from '../components/MobilePanelBar';
 import EpgGuide from '../components/EpgGuide';
+import EpgTimeline from '../components/EpgTimeline';
 import EpgLinkButton from '../components/EpgLinkButton';
 import ProgrammeModal from '../components/ProgrammeModal';
 import VideoPlayer from '../components/VideoPlayer';
@@ -34,6 +35,14 @@ const RECORD_DURATION_OPTIONS = [
 ];
 const MS_PER_MINUTE = 60000;
 
+// How the EPG panel is read. Persisted in settings, so it syncs across devices.
+const EPG_VIEW_LIST = 'list';
+const EPG_VIEW_GRID = 'grid';
+const EPG_VIEWS = [
+  [EPG_VIEW_LIST, 'List'],
+  [EPG_VIEW_GRID, 'Grid'],
+];
+
 export default function LiveView() {
   const state = useStore();
   const { sidebarPanel, currentChannel, channels, epg, history, recordings, selectedCountry } = state;
@@ -44,6 +53,7 @@ export default function LiveView() {
   const setSelectedCountry = useStore((s) => s.setSelectedCountry);
   const setCategory = useStore((s) => s.setCategory);
   const setSidebarPanel = useStore((s) => s.setSidebarPanel);
+  const applySettings = useStore((s) => s.applySettings);
   const [showRecordMenu, setShowRecordMenu] = useState(false);
   const [selectedProgramme, setSelectedProgramme] = useState(null);
 
@@ -100,9 +110,17 @@ export default function LiveView() {
     [state]
   );
 
+  // The guide can be read as cards or as a time grid; the choice is a setting so
+  // it follows the user between devices like every other preference.
+  const isTimeline = sidebarPanel === 'epg' && state.settings.epgView === EPG_VIEW_GRID;
+
   let leftContent;
   if (sidebarPanel === 'epg') {
-    leftContent = <EpgGuide channels={liveChannels} onSelect={playChannel} />;
+    leftContent = isTimeline ? (
+      <EpgTimeline channels={liveChannels} onSelect={playChannel} />
+    ) : (
+      <EpgGuide channels={liveChannels} onSelect={playChannel} />
+    );
   } else if (sidebarPanel === 'history') {
     leftContent = <ChannelList channels={historyChannels} onSelect={playChannel} />;
   } else if (sidebarPanel === 'categories') {
@@ -144,7 +162,12 @@ export default function LiveView() {
     <div className="md:ml-20 pt-24 md:pt-28 px-4 md:px-8 pb-8 min-h-screen">
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
         {/* Left: list — on mobile it stacks BELOW the player (order-3) */}
-        <div className="order-3 lg:order-none lg:col-span-5 xl:col-span-4 flex flex-col gap-3">
+        {/* The timeline needs the wide column; every other panel reads better narrow. */}
+        <div
+          className={`order-3 lg:order-none flex flex-col gap-3 ${
+            isTimeline ? 'lg:col-span-7 xl:col-span-8' : 'lg:col-span-5 xl:col-span-4'
+          }`}
+        >
           <MobilePanelBar />
           {isCountryChannels ? (
             <div className="flex flex-col gap-2">
@@ -163,11 +186,31 @@ export default function LiveView() {
               </div>
             </div>
           ) : (
-            <div>
-              <h2 className="text-2xl font-semibold text-primary">
-                {isGlobalSearch ? 'Results' : PANEL_TITLES[sidebarPanel] || 'Channels'}
-              </h2>
-              <p className="text-on-surface-variant text-sm break-words">{panelSubline}</p>
+            <div className="flex items-start justify-between gap-3 flex-wrap">
+              <div className="min-w-0">
+                <h2 className="text-2xl font-semibold text-primary">
+                  {isGlobalSearch ? 'Results' : PANEL_TITLES[sidebarPanel] || 'Channels'}
+                </h2>
+                <p className="text-on-surface-variant text-sm break-words">{panelSubline}</p>
+              </div>
+              {sidebarPanel === 'epg' && (
+                <div className="flex items-center gap-1 shrink-0 glass rounded-full p-1">
+                  {EPG_VIEWS.map(([view, label]) => (
+                    <button
+                      key={view}
+                      onClick={() => applySettings({ epgView: view })}
+                      aria-pressed={(state.settings.epgView || EPG_VIEW_LIST) === view}
+                      className={`px-3 py-1 rounded-full text-sm transition-colors ${
+                        (state.settings.epgView || EPG_VIEW_LIST) === view
+                          ? 'bg-primary text-on-primary'
+                          : 'text-on-surface-variant hover:text-on-surface'
+                      }`}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
           )}
           {sidebarPanel === 'channels' && <CategoryChips kind="live" />}
@@ -179,7 +222,11 @@ export default function LiveView() {
         {/* Right: player + metadata. On mobile the column uses display:contents so
             the video & metadata become direct grid children — this lets the video
             stay STICKY across the whole page (over the scrolling list). */}
-        <div className="contents lg:flex lg:flex-col lg:gap-5 lg:order-none lg:col-span-7 xl:col-span-8">
+        <div
+          className={`contents lg:flex lg:flex-col lg:gap-5 lg:order-none ${
+            isTimeline ? 'lg:col-span-5 xl:col-span-4' : 'lg:col-span-7 xl:col-span-8'
+          }`}
+        >
           {/* Video — pinned at the top on mobile while the list scrolls under it */}
           <div className="order-1 lg:order-none sticky top-24 z-30 lg:static w-full aspect-video">
             {currentChannel ? (

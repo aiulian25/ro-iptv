@@ -90,6 +90,11 @@ export default function EpgGuide({ channels, onSelect }) {
                               channelLogo: c.logo,
                               url: c.url,
                               title: p.title,
+                              // Streams that only answer a specific agent/referer
+                              // need them at capture time too, exactly as the
+                              // record-now button sends them.
+                              httpUserAgent: c.httpUserAgent || '',
+                              httpReferrer: c.httpReferrer || '',
                               start: new Date(new Date(p.start).getTime() - pad.before * MS_PER_MINUTE).toISOString(),
                               end: new Date(new Date(p.stop).getTime() + pad.after * MS_PER_MINUTE).toISOString(),
                             });

@@ -43,6 +43,16 @@ function guessKind(groupTitle = '', name = '', url = '') {
   return 'live';
 }
 
+// Effective kind for a stored channel: the playlist's contentKind override wins,
+// then the explicit radio="true" playlist attribute, then heuristics.
+// Duplicated from client/src/lib/m3u.js so the server-side channel index routes
+// channels to Live TV / Radio exactly as the client does.
+export function effectiveKind(playlistContentKind, channel) {
+  if (playlistContentKind === 'live' || playlistContentKind === 'radio') return playlistContentKind;
+  if (channel.radio) return 'radio';
+  return guessKind(channel.group, channel.name, channel.url);
+}
+
 /**
  * Parse raw M3U text into a normalized array of channel objects.
  * @param {string} text
