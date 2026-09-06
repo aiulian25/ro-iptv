@@ -15,7 +15,7 @@ import zlib from 'zlib';
 
 import { writeFileAtomic, DATA_DIR } from './store.js';
 import { fetchToBuffer } from './http.js';
-import { normalizeName } from './epgmatch.js';
+import { normalizeName } from '../../shared/normalize.js';
 
 const API_BASE = 'https://iptv-org.github.io/api';
 const CHANNELS_DATASET = 'channels.json';
@@ -27,7 +27,7 @@ const DATASET_TTL_MS = 24 * 60 * 60 * 1000;
 const DATASET_MAX_BYTES = 96 * 1024 * 1024;
 const DATASET_FETCH_TIMEOUT_MS = 120_000;
 
-// The app's canonical country codes are ISO, and client/src/lib/country.js folds
+// The app's canonical country codes are ISO, and shared/country.js folds
 // uk into gb. iptv-org uses UK for the United Kingdom, with ids like BBCOne.uk —
 // so the two disagree for exactly this code.
 const IPTV_ORG_COUNTRY_CODE = { gb: 'UK' };

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import { useStore, selectCategoriesFor, isCountryScoped } from '../store/useStore';
-import { channelCountry } from '../lib/country';
+import { channelCountry } from '@shared/country.js';
 import Icon from './Icon';
 
 // Scrollable category chips. Touch-swipeable everywhere (overflow-x + momentum);

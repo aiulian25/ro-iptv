@@ -12,11 +12,37 @@
 import { promises as fs } from 'fs';
 import path from 'path';
 import zlib from 'zlib';
+import { promisify } from 'util';
+import { Worker } from 'worker_threads';
+import { fileURLToPath } from 'url';
 import crypto from 'crypto';
 
-import { parseEPG } from './epg.js';
 import { readCollection, writeCollection, writeFileAtomic, TMP_SUFFIX, DATA_DIR } from './store.js';
 import { FETCH_HEADERS, isValidUrl, isBlockedTarget, fetchToBuffer } from './http.js';
+import { mergeGuides } from '../../shared/normalize.js';
+
+// zlib's sync calls block the event loop for the whole compress/decompress; a country
+// pack is ~13 MB gzipped and ~72 MB of XML, so every refresh froze playback. The async
+// forms do the same work on the libuv threadpool instead.
+const gunzip = promisify(zlib.gunzip);
+const gzip = promisify(zlib.gzip);
+
+// Parsing a country pack is ~5s of straight CPU. Run on the event loop it froze
+// playback for every viewer at each refresh, so it happens in a worker instead. The
+// worker is handed the RAW download: decompressing and decoding are its job too, so
+// the 63 MB XML string is never materialised on this thread.
+const PARSE_WORKER = fileURLToPath(new URL('./epgparse.worker.js', import.meta.url));
+
+function parseGuideOffThread(body) {
+  return new Promise((resolve, reject) => {
+    const worker = new Worker(PARSE_WORKER, { workerData: { body, maxOutputLength: EPG_MAX_DECOMPRESSED } });
+    worker.once('message', resolve);
+    worker.once('error', reject);
+    worker.once('exit', (code) => {
+      if (code !== 0) reject(new Error(`epg parse worker exited ${code}`));
+    });
+  });
+}
 
 const HEALTH_COLLECTION = 'epg-health';
 const STATE_COLLECTION = 'state';
@@ -90,35 +116,27 @@ export async function configuredEpgUrls() {
   return [...new Set(urls)];
 }
 
-// Download a guide and return its XML. Enforces the same target rules as the
-// request-path endpoints, and caps the transfer WHILE reading rather than after,
-// so an oversized or endless response can't exhaust memory before the check.
-async function fetchGuideXml(url, timeoutMs) {
+// Download a guide's raw bytes. Enforces the same target rules as the request-path
+// endpoints, and caps the transfer WHILE reading rather than after, so an oversized or
+// endless response can't exhaust memory before the check. Decompressing and parsing
+// belong to the worker, so they never run on this thread.
+async function fetchGuideBytes(url, timeoutMs) {
   if (!isValidUrl(url)) throw new Error('invalid EPG url');
   if (isBlockedTarget(url)) throw new Error('refusing a private-network EPG url');
 
-  const buf = await fetchToBuffer(url, {
-    headers: FETCH_HEADERS,
-    timeoutMs,
-    maxBytes: EPG_MAX_DOWNLOAD,
-  });
-  // gzip magic bytes (1f 8b) → a .xml.gz guide; otherwise treat as plain XML.
-  if (buf.length > 2 && buf[0] === 0x1f && buf[1] === 0x8b) {
-    return zlib.gunzipSync(buf, { maxOutputLength: EPG_MAX_DECOMPRESSED }).toString('utf8');
-  }
-  return buf.toString('utf8');
+  return fetchToBuffer(url, { headers: FETCH_HEADERS, timeoutMs, maxBytes: EPG_MAX_DOWNLOAD });
 }
 
 /** Download + parse one source without persisting it. */
 export async function fetchAndParseGuide(url, { timeoutMs = EPG_FETCH_TIMEOUT_MS } = {}) {
-  return parseEPG(await fetchGuideXml(url, timeoutMs));
+  return parseGuideOffThread(await fetchGuideBytes(url, timeoutMs));
 }
 
 // Persist a parsed guide next to the URL it came from, so a load can prove the
 // file belongs to the URL it was asked for. Atomic tmp+rename, as store.js does.
 async function persistGuide(url, guide, fetchedAt) {
   await fs.mkdir(GUIDE_DIR, { recursive: true });
-  await writeFileAtomic(guideFilePath(url), zlib.gzipSync(JSON.stringify({ url, fetchedAt, guide })));
+  await writeFileAtomic(guideFilePath(url), await gzip(JSON.stringify({ url, fetchedAt, guide })));
 }
 
 /** Fetch a source, parse it, persist it, and cache it. Returns {fetchedAt, guide}. */
@@ -146,7 +164,7 @@ export async function loadSource(url) {
   if (cached) return cached;
   let stored;
   try {
-    stored = JSON.parse(zlib.gunzipSync(await fs.readFile(guideFilePath(url))).toString('utf8'));
+    stored = JSON.parse((await gunzip(await fs.readFile(guideFilePath(url)))).toString('utf8'));
   } catch {
     return null; // never fetched, unreadable, or corrupt — the caller refetches
   }
@@ -173,26 +191,6 @@ async function loadOrFetchSource(url) {
   );
   inFlight.set(url, fetching);
   return fetching;
-}
-
-/**
- * Merge several parsed guides into one {channels, programmes}.
- * Ported from mergeEpg in client/src/store/useStore.js so server-side merging is
- * indistinguishable from what the client used to do.
- */
-export function mergeGuides(guides) {
-  const channels = {};
-  const programmes = {};
-  for (const guide of guides) {
-    Object.assign(channels, guide.channels || {});
-    for (const [id, list] of Object.entries(guide.programmes || {})) {
-      programmes[id] = (programmes[id] || []).concat(list);
-    }
-  }
-  for (const id of Object.keys(programmes)) {
-    programmes[id].sort((a, b) => new Date(a.start) - new Date(b.start));
-  }
-  return { channels, programmes };
 }
 
 /**

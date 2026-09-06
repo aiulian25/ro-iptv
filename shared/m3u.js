@@ -1,7 +1,23 @@
-// Client-side M3U parser (used for local file uploads so we don't round-trip to the server).
-import { hashStr } from './uid';
+// Minimal, dependency-free M3U / M3U8 (EXTM3U) playlist parser.
+// Extracts: name, group-title, tvg-id, tvg-name, tvg-logo, and the stream URL.
+//
+// Shared by the browser (local file uploads) and the server (playlist refresh and
+// the channel index). Both must agree on what a channel is, so there is one copy.
 
 const ATTR_RE = /([a-zA-Z0-9_-]+)="([^"]*)"/g;
+
+// A playlist entry is only a stream if it carries a scheme (http, https, rtmp,
+// rtsp, udp, …). Every channel is fetched over the network, so a schemeless line
+// could never have played anyway. `;` section banners and stray notes are not
+// channels — without this they became unnamed "Channel N" entries that never played.
+const STREAM_URL_RE = /^[a-z][a-z0-9+.-]*:\/\//i;
+
+// djb2 hash (unsigned, base36) — short content hash for stable channel ids.
+function hashStr(s) {
+  let h = 5381;
+  for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) >>> 0;
+  return h.toString(36);
+}
 
 // Content-derived channel id — stable across playlist refreshes regardless of
 // ordering. `seen` (a Map) deduplicates identical (tvgId,name,url) tuples within
@@ -17,18 +33,32 @@ export function channelId(channel, seen) {
   return id;
 }
 
+// The channel name is whatever follows the first comma that is NOT inside a quoted
+// attribute value. Scanning for it (rather than taking the last comma) keeps a comma
+// in the name — "Antena 1, HD" — while a comma inside an attribute value still does
+// not end the attribute block, and a quote inside the name is harmless.
+function nameSeparatorIndex(line) {
+  let insideQuotes = false;
+  for (let i = 0; i < line.length; i += 1) {
+    if (line[i] === '"') insideQuotes = !insideQuotes;
+    else if (line[i] === ',' && !insideQuotes) return i;
+  }
+  return -1;
+}
+
 function parseAttributes(line) {
   const attrs = {};
   let m;
-  while ((m = ATTR_RE.exec(line)) !== null) attrs[m[1].toLowerCase()] = m[2];
+  while ((m = ATTR_RE.exec(line)) !== null) {
+    attrs[m[1].toLowerCase()] = m[2];
+  }
   return attrs;
 }
 
-export function guessKind(group = '', name = '', url = '') {
-  const g = group.toLowerCase();
+function guessKind(groupTitle = '', name = '', url = '') {
+  const g = groupTitle.toLowerCase();
   const n = name.toLowerCase();
   const u = url.toLowerCase();
-  // "FM"/"AM"/"radio" in the channel name (e.g. "Europa FM") signal radio too.
   if (/\bradio\b|\bfm\b|\bam\b/.test(n) || /radio|\bfm\b|\bam\b/.test(g)) return 'radio';
   if (/\.(mp3|aac|ogg)(\?|$)/.test(u)) return 'radio';
   return 'live';
@@ -42,6 +72,11 @@ export function effectiveKind(playlistContentKind, channel) {
   return guessKind(channel.group, channel.name, channel.url);
 }
 
+/**
+ * Parse raw M3U text into a normalized array of channel objects.
+ * @param {string} text
+ * @returns {Array<object>}
+ */
 export function parseM3U(text = '') {
   const lines = text.split(/\r?\n/);
   const channels = [];
@@ -49,14 +84,16 @@ export function parseM3U(text = '') {
   let current = null;
   let idx = 0;
 
-  for (const raw of lines) {
+  for (let raw of lines) {
     const line = raw.trim();
-    if (!line || line.startsWith('#EXTM3U')) continue;
+    if (!line) continue;
+
+    if (line.startsWith('#EXTM3U')) continue;
 
     if (line.startsWith('#EXTINF')) {
       const attrs = parseAttributes(line);
-      const commaIdx = line.lastIndexOf(',');
-      const name = commaIdx !== -1 ? line.slice(commaIdx + 1).trim() : attrs['tvg-name'] || 'Unknown';
+      const commaIdx = nameSeparatorIndex(line);
+      const name = commaIdx !== -1 ? line.slice(commaIdx + 1).trim() : (attrs['tvg-name'] || 'Unknown');
       const channelNumber = parseInt(attrs['tvg-chno'], 10);
       current = {
         name,
@@ -76,7 +113,7 @@ export function parseM3U(text = '') {
     } else if (line.startsWith('#EXTGRP:')) {
       if (current) current.group = line.slice(8).trim() || current.group;
     } else if (line.startsWith('#EXTVLCOPT:')) {
-      // Per-stream HTTP headers some streams require to play.
+      // Per-stream playback options — capture the HTTP headers some streams need.
       if (current) {
         const opt = line.slice('#EXTVLCOPT:'.length);
         const eq = opt.indexOf('=');
@@ -88,18 +125,25 @@ export function parseM3U(text = '') {
         }
       }
     } else if (line.startsWith('#')) {
+      // Other directives (#KODIPROP, etc.) — ignore for now.
+      continue;
+    } else if (!STREAM_URL_RE.test(line)) {
+      // Not a stream URL. Playlists in the wild carry `;` section banners and stray
+      // notes, and treating those as URLs invented a phantom channel per line —
+      // unplayable, unnamed, and counted in the channel total.
       continue;
     } else {
+      const url = line;
       const base = current || { name: `Channel ${idx + 1}`, tvgId: '', tvgName: '', logo: '', group: 'Uncategorized', httpUserAgent: '', httpReferrer: '', radio: false, chno: null, tvgShift: 0, catchup: '', catchupSource: '', catchupDays: 0 };
       channels.push({
-        id: channelId({ ...base, url: line }, seen),
+        id: channelId({ ...base, url }, seen),
         name: base.name,
         tvgId: base.tvgId,
         tvgName: base.tvgName,
         logo: base.logo,
         group: base.group,
-        url: line,
-        kind: base.radio ? 'radio' : guessKind(base.group, base.name, line),
+        url,
+        kind: base.radio ? 'radio' : guessKind(base.group, base.name, url),
         httpUserAgent: base.httpUserAgent || '',
         httpReferrer: base.httpReferrer || '',
         radio: base.radio,

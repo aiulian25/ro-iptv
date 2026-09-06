@@ -51,6 +51,7 @@ docker run -d --name ro-iptv -p 56892:56892 \
   -v ro-iptv-data:/data \
   -e TZ=Europe/London \
   -e AUTH_PASSWORD=admin \
+  --restart unless-stopped \
   --read-only --tmpfs /tmp --cap-drop ALL --security-opt no-new-privileges \
   ghcr.io/aiulian25/ro-iptv:latest
 ```
@@ -202,19 +203,20 @@ The image and app are hardened out of the box — non-root, read-only root
 filesystem, all Linux capabilities dropped, `no-new-privileges`, resource/PID
 limits, npm removed, OS packages patched on build, plus a tuned CSP, HSTS,
 `Permissions-Policy`, API rate limiting and upload sanitization. Behind a reverse
-proxy, terminate TLS at the proxy and forward to port 56892.
+proxy, terminate TLS at the proxy, forward to port 56892 and set `TRUST_PROXY=1`.
 
 Optional hardening variables (see [`.env.example`](.env.example)):
 
 | Variable                | Default     | Description                                              |
 | ----------------------- | ----------- | ------------------------------------------------------- |
+| `TRUST_PROXY`           | _empty_     | Reverse-proxy hops to trust for client IP / HTTPS detection. Set `1` behind a TLS proxy. |
 | `CORS_ALLOWED_ORIGINS`  | _empty_     | Comma-separated hosts allowed cross-origin. Empty = any.|
 | `HSTS_MAX_AGE`          | `15552000`  | HSTS max-age (seconds); only honored over HTTPS.        |
 | `RATE_LIMIT_DISABLED`   | _empty_     | Set `1` to turn off API rate limiting entirely.         |
 | `RL_UPSTREAM_MAX`       | `120`       | Max upstream-fetch requests/min/IP (playlist/EPG/parse).|
 | `RL_WRITE_MAX`          | `120`       | Max write requests/min/IP (playlist/recording changes). |
 | `PROXY_BLOCK_PRIVATE`   | _empty_     | Set `1` to refuse proxy/playlist/EPG fetches to private/loopback addresses (SSRF hardening). Leave blank for LAN sources. |
-| `MEM_LIMIT` / `CPU_LIMIT` / `PIDS_LIMIT` | `1024m` / `2` / `256` | Container resource ceilings (compose). |
+| `MEM_LIMIT` / `CPU_LIMIT` / `PIDS_LIMIT` | `2g` / `2` / `256` | Container resource ceilings (both compose files). |
 
 Run the image vulnerability scan suite (Trivy, Grype, hadolint, syft SBOM) with
 `make scan` after `make build`.
@@ -263,7 +265,7 @@ their CORS headers.
 │   │   ├── views/          # Home, Live, Radio, Recordings, Settings, Login, ChangePassword
 │   │   ├── store/          # Zustand store (auth, playlists, favourites, history…)
 │   │   ├── hooks/          # weather, clock, Media Session, floating PiP window
-│   │   ├── lib/            # api, m3u + epg parsing, country helpers
+│   │   ├── lib/            # api, epg display helpers, country presentation
 │   │   └── fonts.css       # self-hosted webfaces (generated, see Fonts below)
 │   └── public/             # manifest icons, favicon, offline page, fonts/
 ├── server/                 # Express API + static host
@@ -276,6 +278,7 @@ their CORS headers.
 │   │                       #   channelsxml— generates the grabber's channel list
 │   │                       #   icy        — radio now-playing over ICY
 │   └── test/               # node:test suites (`npm test`, no extra deps)
+├── shared/                 # code both halves run: m3u parser, country, guide matching
 ├── screenshots/            # README images (sample data only)
 ├── Dockerfile              # multi-stage: build client → hardened Express runtime
 ├── docker-compose.yml      # ready-to-deploy (sidecar via --profile epg)

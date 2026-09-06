@@ -1,0 +1,30 @@
+#EXTM3U url-tvg="https://example.com/guide.xml.gz"
+; ============================================
+; ROMANIA - GENERAL
+; ============================================
+#EXTINF:-1 tvg-id="Antena1.ro" tvg-name="Antena 1" tvg-logo="https://logo.example/antena1.png" group-title="RO | General" tvg-chno="4",Antena 1, HD
+https://cdn.example/antena1/index.m3u8
+#EXTINF:-1 tvg-id="ProTV.ro" group-title="RO | General",Pro TV "Live" Edition
+#EXTVLCOPT:http-user-agent=Mozilla/5.0 (SmartTV)
+#EXTVLCOPT:http-referrer=https://protv.example/
+https://cdn.example/protv/index.m3u8
+; ============================================
+; ROMANIA - CATCHUP
+; ============================================
+#EXTINF:-1 tvg-id="Digi24.ro" tvg-logo="https://logo.example/digi24.png" group-title="RO | News" catchup="shift" catchup-source="https://cdn.example/digi24/index.m3u8?utc={utc}" catchup-days="7" tvg-shift="-1.5",Digi 24
+https://cdn.example/digi24/index.m3u8
+#KODIPROP:inputstream.adaptive.license_type=clearkey
+#EXTINF:-1 tvg-id="EuropaFM.ro" radio="true" group-title="RO | Radio",Europa FM
+http://stream.example:8000/europafm.mp3
+#EXTINF:-1,Radio Without Attributes
+; a banner between the EXTINF and its url must not detach them
+https://stream.example/plain.aac
+#EXTINF:-1 tvg-name="Fallback Name Only" group-title="RO | Misc"
+https://cdn.example/no-comma/index.m3u8
+#EXTINF:-1 tvg-id="Grouped.ro",Grouped By Directive
+#EXTGRP:RO | Sport
+https://cdn.example/grouped/index.m3u8
+just a stray note that is not a url
+https://cdn.example/bare/index.m3u8
+#EXTINF:-1 tvg-id="Rtmp.ro",Legacy RTMP
+rtmp://legacy.example/live/stream

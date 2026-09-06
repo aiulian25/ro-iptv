@@ -48,6 +48,9 @@ services:
       # Set 1 to refuse proxy/playlist/EPG fetches to private/loopback addresses
       # (SSRF hardening). Leave blank if you use LAN IPTV sources:
       - PROXY_BLOCK_PRIVATE=${PROXY_BLOCK_PRIVATE:-}
+      # Reverse-proxy hops to trust for the client IP and HTTPS detection.
+      # Empty = trust none. Set 1 when a TLS proxy sits in front.
+      - TRUST_PROXY=${TRUST_PROXY:-}
       # Points at the optional grabber below. Harmless when it is not running.
       - EPG_SIDECAR_URL=${EPG_SIDECAR_URL:-http://epg:3000/guide.xml}
       # A country EPG pack is ~13 MB gzipped but ~72 MB of XML, and parsing it
@@ -69,6 +72,16 @@ services:
       - ALL                          # the app needs no Linux capabilities
     security_opt:
       - no-new-privileges:true
+    # Resource ceilings, matching docker-compose.build.yml. NODE_HEAP_MB below sets
+    # node's heap to 1536 MB, which only bounds the JS heap — without a cgroup limit
+    # around it a runaway parse or ffmpeg fan-out could still take the host with it.
+    mem_limit: ${MEM_LIMIT:-2g}
+    cpus: ${CPU_LIMIT:-2}
+    pids_limit: ${PIDS_LIMIT:-256}
+    ulimits:
+      nofile:
+        soft: ${NOFILE_SOFT:-4096}
+        hard: ${NOFILE_HARD:-8192}
 
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:56892/api/health"]

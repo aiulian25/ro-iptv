@@ -19,7 +19,7 @@ export const EPG_SOURCE_REGISTRY = [
     name: 'EPGSHARE01',
     countries: 'all',
     // Publishes the UK pack as UK; the app's canonical code for it is the ISO gb
-    // (client/src/lib/country.js maps uk -> gb), so epg_ripper_GB1 does not exist.
+    // (shared/country.js maps uk -> gb), so epg_ripper_GB1 does not exist.
     codeAliases: { gb: 'UK' },
     urlFor: (providerCode) => `https://epgshare01.online/epgshare01/epg_ripper_${providerCode}1.xml.gz`,
     notes: 'Per-country packs, refreshed daily. Not every country has one.',

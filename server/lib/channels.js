@@ -17,10 +17,10 @@
 // separate invalidation flag to keep in sync.
 import { promises as fs } from 'fs';
 
-import { parseM3U, effectiveKind } from './m3u.js';
-import { channelCountry } from './country.js';
+import { parseM3U, effectiveKind } from '../../shared/m3u.js';
+import { channelCountry } from '../../shared/country.js';
 import { readCollection, writeCollection, collectionChangedAt, playlistFilePath } from './store.js';
-import { FETCH_HEADERS, isValidUrl, isBlockedTarget, guardedFetch } from './http.js';
+import { isValidUrl, isBlockedTarget, fetchToBuffer } from './http.js';
 
 const COLLECTION = 'epg-channels';
 const PLAYLIST_COLLECTION = 'playlists';
@@ -35,6 +35,9 @@ const PARTIAL_INDEX_TTL_MS = 5 * 60 * 1000;
 const DIRTY_DEBOUNCE_MS = 5000;
 // A background rebuild must never hang on one unresponsive upstream.
 const PLAYLIST_FETCH_TIMEOUT_MS = 30_000;
+// A rebuild must never buffer an unbounded response either; the same ceiling the
+// request path applies to a playlist download.
+const MAX_PLAYLIST_BYTES = 64 * 1024 * 1024;
 // Bounds what a rebuild retains in memory and writes to disk. Far above any real
 // playlist; a truncated index says so rather than silently dropping channels.
 const MAX_INDEXED_CHANNELS = 100_000;
@@ -53,12 +56,11 @@ async function readPlaylistChannels(playlist) {
   if (playlist.url) {
     if (!isValidUrl(playlist.url)) throw new Error('invalid playlist url');
     if (isBlockedTarget(playlist.url)) throw new Error('refusing a private-network playlist url');
-    const upstream = await guardedFetch(playlist.url, {
-      headers: FETCH_HEADERS,
-      signal: AbortSignal.timeout(PLAYLIST_FETCH_TIMEOUT_MS),
+    const downloaded = await fetchToBuffer(playlist.url, {
+      timeoutMs: PLAYLIST_FETCH_TIMEOUT_MS,
+      maxBytes: MAX_PLAYLIST_BYTES,
     });
-    if (!upstream.ok) throw new Error(`upstream ${upstream.status}`);
-    return parseM3U(await upstream.text());
+    return parseM3U(downloaded.toString('utf8'));
   }
 
   if (!playlist.hasFile) return [];

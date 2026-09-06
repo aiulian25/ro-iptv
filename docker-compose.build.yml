@@ -69,6 +69,9 @@ services:
       - RL_WRITE_MAX=${RL_WRITE_MAX:-120}
       # SSRF hardening — set 1 to block private/loopback upstream fetches:
       - PROXY_BLOCK_PRIVATE=${PROXY_BLOCK_PRIVATE:-}
+      # Reverse-proxy hops to trust for the client IP and HTTPS detection.
+      # Empty = trust none. Set 1 when a TLS proxy sits in front.
+      - TRUST_PROXY=${TRUST_PROXY:-}
       # Points at the optional grabber below. Harmless when it is not running.
       - EPG_SIDECAR_URL=${EPG_SIDECAR_URL:-http://epg:3000/guide.xml}
       # A country EPG pack is ~13 MB gzipped but ~72 MB of XML, and parsing it

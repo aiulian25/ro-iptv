@@ -15,7 +15,7 @@ import { promises as fs } from 'fs';
 import path from 'path';
 
 import { writeFileAtomic, writeCollection, readCollection, DATA_DIR } from './store.js';
-import { normalizeName, channelIdCandidates } from './epgmatch.js';
+import { normalizeName, channelIdCandidates } from '../../shared/normalize.js';
 import { loadIptvOrgIndex } from './iptvorg.js';
 
 const SIDECAR_COLLECTION = 'epg-sidecar';

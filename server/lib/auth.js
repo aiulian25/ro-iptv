@@ -38,6 +38,13 @@ export function currentUsername() {
   return storedCred ? storedCred.username : ENV_USERNAME;
 }
 
+// The credential a token was minted against. Setting a password writes a new
+// updatedAt, so every token signed before it stops verifying. Persisted with the
+// credential, so a restart does NOT invalidate sessions — only a password change does.
+function credentialVersion() {
+  return storedCred ? storedCred.updatedAt : 'env';
+}
+
 // True while still on the bootstrap credential (no stored password yet).
 export function needsPasswordChange() {
   return isAuthEnabled() && !storedCred;
@@ -95,13 +102,15 @@ export function verifyToken(token) {
     return null;
   }
   if (!payload || typeof payload.exp !== 'number' || payload.exp < Date.now()) return null;
+  // Minted against a password that has since been replaced (or a pre-cv token).
+  if (payload.cv !== credentialVersion()) return null;
   return payload;
 }
 
 // Mint a signed token. `mustChange` flags a bootstrap session. Returns { token }.
 export function issueToken(days, mustChange) {
   const exp = Date.now() + days * 24 * 60 * 60 * 1000;
-  return { token: signToken({ u: currentUsername(), exp, mc: mustChange ? 1 : 0 }) };
+  return { token: signToken({ u: currentUsername(), exp, mc: mustChange ? 1 : 0, cv: credentialVersion() }) };
 }
 
 // ---- credential verification --------------------------------------------

@@ -5,10 +5,11 @@ import Icon from './Icon';
 
 // Mockup screen 1: browse Live TV by country.
 export default function CountryGrid({ onSelect }) {
-  const state = useStore();
+  // selectCountries reads only the channel list, so that is all this subscribes to.
+  const channels = useStore((s) => s.channels);
   const [query, setQuery] = useState('');
 
-  const countries = useMemo(() => selectCountries(state, 'live'), [state]);
+  const countries = useMemo(() => selectCountries({ channels }, 'live'), [channels]);
   const total = useMemo(() => countries.reduce((n, [, c]) => n + c, 0), [countries]);
 
   const filtered = useMemo(() => {

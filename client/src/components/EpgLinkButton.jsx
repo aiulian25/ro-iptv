@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useStore } from '../store/useStore';
-import { normalizeName } from '../lib/epg';
+import { normalizeName } from '@shared/normalize.js';
 import Icon from './Icon';
 
 const MAX_ROWS = 50;

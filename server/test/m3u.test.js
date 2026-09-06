@@ -1,4 +1,4 @@
-// The M3U parser's URL detection (server/lib/m3u.js).
+// The M3U parser's URL detection (shared/m3u.js).
 //
 // Anything that was not a `#` directive used to be accepted as a stream URL. Real
 // playlists carry `;` section banners and stray notes, and each one became a
@@ -7,7 +7,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { parseM3U } from '../lib/m3u.js';
+import { parseM3U } from '../../shared/m3u.js';
 
 test('semicolon banners and stray text do not become channels', () => {
   const channels = parseM3U(
@@ -59,6 +59,38 @@ test('a banner between EXTINF and its URL keeps the metadata attached', () => {
   assert.equal(channels.length, 1);
   assert.equal(channels[0].name, 'Named Channel');
   assert.equal(channels[0].tvgId, 'X.ro');
+});
+
+// Regression: the name was read from the LAST comma on the line, so any comma inside
+// it truncated the name — "Antena 1, HD" arrived as "HD". It is now read from the first
+// comma OUTSIDE the quoted attribute block.
+test('a comma inside the channel name survives', () => {
+  const channels = parseM3U(
+    [
+      '#EXTM3U',
+      '#EXTINF:-1 tvg-id="Antena1.ro" group-title="RO | General",Antena 1, HD',
+      'http://example.com/antena.m3u8',
+      '#EXTINF:-1,No Attributes, Also Comma',
+      'http://example.com/plain.m3u8',
+      '#EXTINF:-1 tvg-name="Foo, Bar",Attribute Comma Only',
+      'http://example.com/attr.m3u8',
+    ].join('\n'),
+  );
+
+  assert.deepEqual(
+    channels.map((c) => c.name),
+    ['Antena 1, HD', 'No Attributes, Also Comma', 'Attribute Comma Only'],
+  );
+});
+
+// A quote inside the name must not be mistaken for the end of the attribute block.
+test('a quoted phrase inside the channel name is kept whole', () => {
+  const channels = parseM3U(
+    ['#EXTM3U', '#EXTINF:-1 tvg-id="x",Channel "Live" Edition', 'http://example.com/q.m3u8'].join('\n'),
+  );
+
+  assert.equal(channels.length, 1);
+  assert.equal(channels[0].name, 'Channel "Live" Edition');
 });
 
 test('a URL with no preceding EXTINF is still kept, with a generated name', () => {

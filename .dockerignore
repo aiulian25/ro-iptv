@@ -4,6 +4,9 @@
 **/.env
 **/.DS_Store
 **/npm-debug.log
+
+# Dev-only: the runtime image runs `node index.js`, never the suite.
+server/test
 data
 stitch_landing_page_ui_refinement*
 Prompt to build.txt

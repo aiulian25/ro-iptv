@@ -1,0 +1,6 @@
+{
+  "name": "ro-iptv-shared",
+  "private": true,
+  "type": "module",
+  "description": "Modules the browser and the server both run. No dependencies, no build step."
+}

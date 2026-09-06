@@ -32,10 +32,16 @@ test('isPrivateHost covers loopback, RFC1918, CGNAT, link-local and internal nam
     '::1',
     'fd00::1',
     'fe80::1',
+    // IPv4-mapped IPv6: the dotted spelling a user types, and the hex-pair form
+    // Node's URL parser hands back for it.
+    '::ffff:127.0.0.1',
+    '::ffff:7f00:1',
+    '::ffff:a00:1',
+    '::ffff:c0a8:101',
   ]) {
     assert.equal(isPrivateHost(host), true, `${host} must be private`);
   }
-  for (const host of ['example.com', '8.8.8.8', '172.32.0.1', '192.169.0.1', '100.128.0.1']) {
+  for (const host of ['example.com', '8.8.8.8', '172.32.0.1', '192.169.0.1', '100.128.0.1', '::ffff:8.8.8.8', '::ffff:808:808']) {
     assert.equal(isPrivateHost(host), false, `${host} must be public`);
   }
 });

@@ -1,6 +1,7 @@
 import { useMemo, useState, useEffect } from 'react';
 import { useStore, selectFilteredChannels, selectCountries } from '../store/useStore';
-import { countryFlag, countryName, channelCountry } from '../lib/country';
+import { countryFlag, countryName } from '../lib/country';
+import { channelCountry } from '@shared/country.js';
 import CategoryChips from '../components/CategoryChips';
 import RadioPlayer from '../components/RadioPlayer';
 import ChannelLogo from '../components/ChannelLogo';
@@ -11,15 +12,24 @@ import Icon from '../components/Icon';
 const ALL_COUNTRIES = '*';
 
 export default function RadioView() {
-  const state = useStore();
+  // Per-slice selectors: a whole-store subscription re-filtered every station on any
+  // unrelated write (see LiveView for the same change).
+  const channels = useStore((s) => s.channels);
+  const sidebarPanel = useStore((s) => s.sidebarPanel);
+  const selectedCountry = useStore((s) => s.selectedCountry);
+  const favourites = useStore((s) => s.favourites);
+  const activeCategory = useStore((s) => s.activeCategory);
+  const search = useStore((s) => s.search);
+  const filterState = { channels, sidebarPanel, selectedCountry, favourites, activeCategory, search };
   const playChannel = useStore((s) => s.playChannel);
   const currentChannel = useStore((s) => s.currentChannel);
   const stopPlayback = useStore((s) => s.stopPlayback);
   const [active, setActive] = useState(null);
   const [country, setCountry] = useState(ALL_COUNTRIES);
 
-  const stations = useMemo(() => selectFilteredChannels(state, 'radio'), [state]);
-  const countries = useMemo(() => selectCountries(state, 'radio'), [state.channels]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const stations = useMemo(() => selectFilteredChannels(filterState, 'radio'), [channels, sidebarPanel, selectedCountry, favourites, activeCategory, search]);
+  const countries = useMemo(() => selectCountries({ channels }, 'radio'), [channels]);
   const visibleStations = useMemo(
     () => (country === ALL_COUNTRIES ? stations : stations.filter((s) => channelCountry(s) === country)),
     [stations, country]

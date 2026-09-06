@@ -23,9 +23,24 @@ export function isValidUrl(u) {
 // which is out of scope here).
 export const BLOCK_PRIVATE = process.env.PROXY_BLOCK_PRIVATE === '1';
 
+// The two 16-bit groups of an IPv4-mapped IPv6 address, back to dotted quad:
+// 7f00:1 -> 127.0.0.1
+function hexPairToDotted(high, low) {
+  const a = parseInt(high, 16);
+  const b = parseInt(low, 16);
+  return `${a >> 8}.${a & 0xff}.${b >> 8}.${b & 0xff}`;
+}
+
 export function isPrivateHost(hostname) {
   const h = hostname.toLowerCase().replace(/^\[|\]$/g, '');
   if (h === 'localhost' || h.endsWith('.localhost') || h.endsWith('.local') || h.endsWith('.internal')) return true;
+  // ::ffff:a.b.c.d is IPv4 in an IPv6 coat, and Node's URL parser normalises it to
+  // the ::ffff:xxxx:xxxx form — so both spellings are unwrapped and re-checked as IPv4.
+  const mapped = h.match(/^::ffff:(?:(\d+\.\d+\.\d+\.\d+)|([0-9a-f]{1,4}):([0-9a-f]{1,4}))$/);
+  if (mapped) {
+    const dotted = mapped[1] || hexPairToDotted(mapped[2], mapped[3]);
+    return isPrivateHost(dotted);
+  }
   const v4 = h.match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
   if (v4) {
     const [a, b] = [+v4[1], +v4[2]];

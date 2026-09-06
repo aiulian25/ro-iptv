@@ -1,6 +1,13 @@
 import { useState } from 'react';
 import { useStore, epgSources } from '../store/useStore';
-import { programmesForChannel, findNowNext, fmtTime, progressPct, epgIconFor } from '../lib/epg';
+import {
+  programmesForChannel,
+  findNowNext,
+  fmtTime,
+  progressPct,
+  epgIconFor,
+  isProgrammeScheduled,
+} from '../lib/epg';
 import ChannelLogo from './ChannelLogo';
 import ProgrammeModal from './ProgrammeModal';
 import EpgLinkButton from './EpgLinkButton';
@@ -68,7 +75,7 @@ export default function EpgGuide({ channels, onSelect }) {
               <div className="flex gap-2 overflow-x-auto no-scrollbar pb-1">
                 {upcoming.map((p, i) => {
                   const isNow = now && p.start === now.start;
-                  const isRec = recordings.some((r) => r.channelName === c.name && r.title === p.title);
+                  const isScheduled = isProgrammeScheduled(recordings, c.name, p);
                   return (
                     <div
                       key={i}
@@ -99,7 +106,7 @@ export default function EpgGuide({ channels, onSelect }) {
                               end: new Date(new Date(p.stop).getTime() + pad.after * MS_PER_MINUTE).toISOString(),
                             });
                           }}
-                          className={isRec ? 'text-error' : 'text-on-surface-variant hover:text-error'}
+                          className={isScheduled ? 'text-error' : 'text-on-surface-variant hover:text-error'}
                           title="Schedule recording"
                         >
                           <Icon name="fiber_manual_record" className="text-base" />

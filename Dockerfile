@@ -10,7 +10,10 @@
 FROM --platform=$BUILDPLATFORM node:20-alpine AS client-build
 WORKDIR /app/client
 COPY client/package*.json ./
-RUN npm install
+RUN npm ci
+# Code both halves run (the M3U parser, country detection, guide matching).
+# Copied before the client sources so a shared change does not bust the npm layer.
+COPY shared/ /app/shared/
 COPY client/ ./
 RUN npm run build
 
@@ -24,7 +27,7 @@ RUN npm run build
 FROM --platform=$BUILDPLATFORM node:20-alpine AS server-deps
 WORKDIR /app/server
 COPY server/package*.json ./
-RUN npm install --omit=dev
+RUN npm ci --omit=dev
 
 # ----------------------------------------------------------------------------
 # Stage 3 — final runtime image (single container: Express serves API + SPA)
@@ -47,8 +50,9 @@ RUN apk upgrade --no-cache && apk add --no-cache ffmpeg
 # "remove unused tools to shrink the image".
 RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx
 
-# Backend source + its node_modules
+# Backend source, the shared modules it imports as ../../shared, and node_modules
 COPY server/ ./
+COPY shared/ /app/shared/
 COPY --from=server-deps /app/server/node_modules ./node_modules
 # Built frontend served as static files
 COPY --from=client-build /app/client/dist ./public

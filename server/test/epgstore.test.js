@@ -79,8 +79,9 @@ async function writeSettings(epgUrls) {
   );
 }
 
-const { configuredEpgUrls, mergeGuides, refreshSource, loadSource, getMergedGuide, refreshAll, readSourceHealth } =
+const { configuredEpgUrls, refreshSource, loadSource, getMergedGuide, refreshAll, readSourceHealth } =
   await import('../lib/epgstore.js');
+const { mergeGuides } = await import('../../shared/normalize.js');
 
 test('a rejected refresh still drains its queued follow-up', async () => {
   await writeSettings([PLAIN_URL]);

@@ -1,4 +1,5 @@
 // EPG helpers operating on the parsed structure returned by the backend.
+import { normalizeName, channelIdCandidates } from '@shared/normalize.js';
 
 export function findNowNext(programmes = [], at = new Date()) {
   if (!programmes || !programmes.length) return { now: null, next: null };
@@ -32,37 +33,32 @@ export function progressPct(programme, at = new Date()) {
   return Math.round(((t - start) / (stop - start)) * 100);
 }
 
+// A scheduled recording stores the *padded* start (up to 15 minutes before the
+// programme, see PADDING_OPTIONS in SettingsPage), so an exact timestamp match would
+// never hit. Half an hour is comfortably wider than that padding and far narrower
+// than the gap between two airings of the same programme.
+const SCHEDULE_MATCH_WINDOW_MS = 30 * 60_000;
+
+// Whether this exact airing already has a recording scheduled. Title alone is not
+// enough: a daily programme would show every future airing as scheduled as soon as
+// one of them was.
+export function isProgrammeScheduled(recordings = [], channelName, programme) {
+  if (!programme) return false;
+  const programmeStart = Date.parse(programme.start);
+  return recordings.some(
+    (recording) =>
+      recording.channelName === channelName &&
+      recording.title === programme.title &&
+      Math.abs(Date.parse(recording.start) - programmeStart) < SCHEDULE_MATCH_WINDOW_MS
+  );
+}
+
 export function fmtTime(iso) {
   if (!iso) return '';
   return new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
 
 const MS_PER_HOUR = 3_600_000;
-
-// Fold a channel name to a comparison key: lowercase, strip diacritics, drop
-// quality suffixes (HD/FHD/UHD/4K/8K/SD) and all non-alphanumerics. So
-// "Digi 24 HD", "Digi24" and "digi-24" all collapse to "digi24".
-export function normalizeName(s) {
-  return String(s || '')
-    // Playlists annotate names with resolution and status — "Agro TV (360p)
-    // [Not 24/7]" is the same channel a guide calls "Agro TV".
-    .replace(/\([^)]*\)|\[[^\]]*\]/g, '')
-    .toLowerCase()
-    .normalize('NFD')
-    .replace(/\p{Diacritic}/gu, '')
-    .replace(/\b(hd|fhd|uhd|4k|8k|sd)\b/g, '')
-    .replace(/[^a-z0-9]/g, '');
-}
-
-// The ids a channel's tvg-id could be keyed under: iptv-org ids carry an optional
-// feed suffix ("Digi24.ro@SD") that most guides drop. Exact first, so a guide that
-// really does key on the feed still wins. Mirrors server/lib/epgmatch.js.
-export function channelIdCandidates(tvgId) {
-  const id = String(tvgId || '').trim();
-  if (!id) return [];
-  const base = id.split('@')[0];
-  return base && base !== id ? [id, base] : [id];
-}
 
 // An epg.channels value is `{name, icon}` (current) or a bare display-name string
 // (an old-shape response still cached by the service worker). Normalize to the name.

@@ -148,7 +148,7 @@ const VideoPlayer = forwardRef(function VideoPlayer({ channel, onPrev, onNext, o
   else if (isHls) badgeLabel = 'HLS • LIVE';
 
   return (
-    <div ref={containerRef} className="relative w-full h-full bg-black rounded-3xl overflow-hidden group">
+    <div ref={containerRef} className="relative w-full h-full bg-black rounded-3xl overflow-hidden">
       <video
         ref={videoRef}
         className="w-full h-full object-contain bg-black"
@@ -171,8 +171,15 @@ const VideoPlayer = forwardRef(function VideoPlayer({ channel, onPrev, onNext, o
         <span className="font-mono text-xs text-primary">{badgeLabel}</span>
       </div>
 
+      {/* The strip that wakes the controls. Hovering the whole player kept the bar
+          up almost permanently in fullscreen, over the picture; this limits the
+          trigger to the bottom edge. It must PRECEDE the bar — `peer-hover` only
+          reaches forward — and the bar paints above it, so its buttons stay clickable.
+          Touch has no hover, so below md the bar simply stays visible. */}
+      <div aria-hidden="true" className="peer hidden md:block absolute inset-x-0 bottom-0 h-32" />
+
       {/* Control bar */}
-      <div className="absolute bottom-0 inset-x-0 p-3 md:p-4 bg-gradient-to-t from-black/80 to-transparent flex flex-col gap-2 opacity-100 md:opacity-0 md:group-hover:opacity-100 transition-opacity">
+      <div className="absolute bottom-0 inset-x-0 p-3 md:p-4 bg-gradient-to-t from-black/80 to-transparent flex flex-col gap-2 opacity-100 md:opacity-0 md:peer-hover:opacity-100 md:hover:opacity-100 md:focus-within:opacity-100 transition-opacity">
         {/* Scrubber — only for finite media (VOD/catchup); live streams have no duration */}
         {time.dur > 0 && (
           <div className="flex items-center gap-2 px-1">

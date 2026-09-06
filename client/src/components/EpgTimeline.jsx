@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useStore } from '../store/useStore';
-import { programmesForChannel, fmtTime } from '../lib/epg';
+import { programmesForChannel, fmtTime, isProgrammeScheduled } from '../lib/epg';
 import { supportsCatchup } from '../lib/catchup';
 import ChannelLogo from './ChannelLogo';
 import ProgrammeModal from './ProgrammeModal';
@@ -211,9 +211,7 @@ function ChannelRow({
         {blocks.map(({ programme, left, width, start, stop }) => {
           const isNow = start <= now && now < stop;
           const isPast = stop <= now;
-          const isRecording = recordings.some(
-            (recording) => recording.channelName === channel.name && recording.title === programme.title
-          );
+          const isScheduled = isProgrammeScheduled(recordings, channel.name, programme);
           return (
             <div
               key={`${start}-${programme.title}`}
@@ -261,7 +259,7 @@ function ChannelRow({
                     }}
                     title={`Schedule ${programme.title}`}
                     aria-label={`Schedule ${programme.title}`}
-                    className={isRecording ? 'text-error' : 'text-on-surface-variant hover:text-error'}
+                    className={isScheduled ? 'text-error' : 'text-on-surface-variant hover:text-error'}
                   >
                     <Icon name="fiber_manual_record" className="text-sm" />
                   </button>

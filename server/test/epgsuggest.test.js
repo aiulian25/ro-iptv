@@ -4,7 +4,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { EPG_SOURCE_REGISTRY, suggestionsForCountries } from '../lib/epgsources.js';
-import { normalizeName, matchGuideToChannels, matchAll, buildAltNameIndex, channelIdCandidates } from '../lib/epgmatch.js';
+import { matchGuideToChannels, matchAll, buildAltNameIndex } from '../lib/epgmatch.js';
+import { normalizeName, channelIdCandidates } from '../../shared/normalize.js';
 
 const GUIDE = {
   channels: { 'Digi24.ro': { name: 'Digi 24' }, 'PROTV.ro': { name: 'Pro TV International' } },

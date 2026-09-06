@@ -1,36 +1,9 @@
 // How much of the user's channel set a guide actually covers.
 //
-// Mirrors the client's resolveKey (client/src/lib/epg.js): exact tvg-id first,
-// then a normalized display-name match. Duplicated server-side for the same
-// reason the M3U parser is (see server/lib/m3u.js) — there is no shared lib — so
-// a guide's reported match count is what the client will really resolve.
+// Exact tvg-id first, then a normalized display-name match — the same resolution
+// the browser performs, because both sides use shared/normalize.js.
 
-// Fold a channel name to a comparison key: lowercase, strip diacritics, drop
-// quality suffixes (HD/FHD/UHD/4K/8K/SD) and all non-alphanumerics. So
-// "Digi 24 HD", "Digi24" and "digi-24" all collapse to "digi24".
-export function normalizeName(value) {
-  return String(value || '')
-    // Playlists annotate names with resolution and status — "Agro TV (360p)
-    // [Not 24/7]" is the same channel a guide calls "Agro TV".
-    .replace(/\([^)]*\)|\[[^\]]*\]/g, '')
-    .toLowerCase()
-    .normalize('NFD')
-    .replace(/\p{Diacritic}/gu, '')
-    .replace(/\b(hd|fhd|uhd|4k|8k|sd)\b/g, '')
-    .replace(/[^a-z0-9]/g, '');
-}
-
-/**
- * The ids a channel's tvg-id could be keyed under. iptv-org ids carry an optional
- * feed suffix ("Digi24.ro@SD") that most guides drop, so the bare channel is
- * tried after the exact id — a guide that really does key on the feed still wins.
- */
-export function channelIdCandidates(tvgId) {
-  const id = String(tvgId || '').trim();
-  if (!id) return [];
-  const base = id.split('@')[0];
-  return base && base !== id ? [id, base] : [id];
-}
+import { normalizeName, channelIdCandidates } from '../../shared/normalize.js';
 
 // An epg.channels value is {name, icon}; older cached shapes were a bare string.
 function channelDisplayName(value) {

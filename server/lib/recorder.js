@@ -11,6 +11,10 @@ import path from 'path';
 const active = new Map(); // id -> { child, filePath }
 
 const FILENAME_RE = /^[a-zA-Z0-9-]+\.mp4$/;
+// Everything a live HLS/TS/MP4 capture over http(s) needs, and nothing else, so a
+// crafted input can never make ffmpeg open file:, concat:, subfile:, data: or udp:.
+// Applies to the INPUT only — the captured .mp4 is still written over file:.
+const FFMPEG_PROTOCOL_WHITELIST = 'http,https,tcp,tls,crypto';
 
 export function recordingsDir(dataDir) {
   return path.join(dataDir, 'recordings');
@@ -62,6 +66,8 @@ export function startCapture({ rec, dataDir, maxMinutes, userAgent, referer, onF
     userAgent || 'Mozilla/5.0 (RO-IPTV)',
     // Forward a Referer for streams that require it (CRLF-terminated per ffmpeg).
     ...(referer ? ['-headers', `Referer: ${referer}\r\n`] : []),
+    '-protocol_whitelist',
+    FFMPEG_PROTOCOL_WHITELIST,
     '-i',
     rec.url,
     '-c',

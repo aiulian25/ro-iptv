@@ -44,8 +44,22 @@ const EPG_VIEWS = [
 ];
 
 export default function LiveView() {
-  const state = useStore();
-  const { sidebarPanel, currentChannel, channels, epg, history, recordings, selectedCountry } = state;
+  // One selector per slice: subscribing to the whole store re-rendered this view — and
+  // re-filtered the entire channel list — on every unrelated write (a toast, a history
+  // push, the recordings poll).
+  const sidebarPanel = useStore((s) => s.sidebarPanel);
+  const currentChannel = useStore((s) => s.currentChannel);
+  const channels = useStore((s) => s.channels);
+  const epg = useStore((s) => s.epg);
+  const history = useStore((s) => s.history);
+  const recordings = useStore((s) => s.recordings);
+  const selectedCountry = useStore((s) => s.selectedCountry);
+  const favourites = useStore((s) => s.favourites);
+  const activeCategory = useStore((s) => s.activeCategory);
+  const search = useStore((s) => s.search);
+  const settings = useStore((s) => s.settings);
+  // Exactly the fields selectFilteredChannels reads (see useStore.js).
+  const filterState = { channels, sidebarPanel, selectedCountry, favourites, activeCategory, search };
   const playChannel = useStore((s) => s.playChannel);
   const startRecording = useStore((s) => s.startRecording);
   const stopRecording = useStore((s) => s.stopRecording);
@@ -59,10 +73,11 @@ export default function LiveView() {
 
   // Sort by tvg-chno only when every channel in view has one; a mixed list keeps playlist order.
   const liveChannels = useMemo(() => {
-    const list = selectFilteredChannels(state, 'live');
+    const list = selectFilteredChannels(filterState, 'live');
     const allNumbered = list.length > 0 && list.every((c) => c.chno != null);
     return allNumbered ? [...list].sort((a, b) => a.chno - b.chno) : list;
-  }, [state]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [channels, sidebarPanel, selectedCountry, favourites, activeCategory, search]);
 
   // Prev/next within the current filtered list — drives OS prev/next controls.
   const playRelative = (dir) => {
@@ -74,7 +89,7 @@ export default function LiveView() {
 
   // Country browser (mockup screen 1) vs a selected country's channels (screen 2).
   // An active search on the country browser swaps the grid for cross-country results.
-  const searching = state.search.trim().length > 0;
+  const searching = search.trim().length > 0;
   const showGrid = sidebarPanel === 'channels' && selectedCountry === null && !searching;
   const isGlobalSearch = sidebarPanel === 'channels' && selectedCountry === null && searching;
   const isCountryChannels = sidebarPanel === 'channels' && selectedCountry !== null;
@@ -93,7 +108,7 @@ export default function LiveView() {
     [history]
   );
 
-  const epgOverrides = state.settings.epgOverrides || {};
+  const epgOverrides = settings.epgOverrides || {};
   const progs = currentChannel ? programmesForChannel(epg, currentChannel, epgOverrides) : [];
   const { now, next } = findNowNext(progs);
 
@@ -106,13 +121,14 @@ export default function LiveView() {
   // Category cards are built from the country-scoped list WITHOUT the category
   // filter, so counts don't collapse to the active category.
   const categoryBase = useMemo(
-    () => selectFilteredChannels({ ...state, activeCategory: 'All' }, 'live'),
-    [state]
+    () => selectFilteredChannels({ ...filterState, activeCategory: 'All' }, 'live'),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [channels, sidebarPanel, selectedCountry, favourites, activeCategory, search]
   );
 
   // The guide can be read as cards or as a time grid; the choice is a setting so
   // it follows the user between devices like every other preference.
-  const isTimeline = sidebarPanel === 'epg' && state.settings.epgView === EPG_VIEW_GRID;
+  const isTimeline = sidebarPanel === 'epg' && settings.epgView === EPG_VIEW_GRID;
 
   let leftContent;
   if (sidebarPanel === 'epg') {
@@ -144,7 +160,7 @@ export default function LiveView() {
   const listCount = sidebarPanel === 'history' ? historyChannels.length : liveChannels.length;
 
   let panelSubline = `Live Now • ${listCount} Channels`;
-  if (isGlobalSearch) panelSubline = `${listCount} matches for “${state.search.trim()}”`;
+  if (isGlobalSearch) panelSubline = `${listCount} matches for “${search.trim()}”`;
   if (sidebarPanel === 'categories') panelSubline = 'Pick a category';
   if (sidebarPanel === 'catchup') panelSubline = `${liveChannels.filter(supportsCatchup).length} archive channels`;
 
@@ -199,9 +215,9 @@ export default function LiveView() {
                     <button
                       key={view}
                       onClick={() => applySettings({ epgView: view })}
-                      aria-pressed={(state.settings.epgView || EPG_VIEW_LIST) === view}
+                      aria-pressed={(settings.epgView || EPG_VIEW_LIST) === view}
                       className={`px-3 py-1 rounded-full text-sm transition-colors ${
-                        (state.settings.epgView || EPG_VIEW_LIST) === view
+                        (settings.epgView || EPG_VIEW_LIST) === view
                           ? 'bg-primary text-on-primary'
                           : 'text-on-surface-variant hover:text-on-surface'
                       }`}

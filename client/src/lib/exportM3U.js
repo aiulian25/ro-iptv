@@ -1,13 +1,17 @@
 // Reconstruct a valid .m3u from parsed channels (download fallback for playlists
 // whose original uploaded file isn't stored server-side, e.g. URL playlists).
+
+// M3U attributes have no escape syntax; a quote inside a value ends the value early.
+const quoteAttribute = (value) => `"${String(value).replace(/"/g, "'")}"`;
+
 export function channelsToM3U(channels = []) {
   const lines = ['#EXTM3U'];
   for (const c of channels) {
     const attrs = [
-      c.tvgId ? `tvg-id="${c.tvgId}"` : '',
-      c.tvgName ? `tvg-name="${c.tvgName}"` : '',
-      c.logo ? `tvg-logo="${c.logo}"` : '',
-      c.group ? `group-title="${c.group}"` : '',
+      c.tvgId ? `tvg-id=${quoteAttribute(c.tvgId)}` : '',
+      c.tvgName ? `tvg-name=${quoteAttribute(c.tvgName)}` : '',
+      c.logo ? `tvg-logo=${quoteAttribute(c.logo)}` : '',
+      c.group ? `group-title=${quoteAttribute(c.group)}` : '',
     ]
       .filter(Boolean)
       .join(' ');

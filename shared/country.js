@@ -1,11 +1,11 @@
 // Country detection from M3U fields (no lookup tables, no network).
-// Duplicated from client/src/lib/country.js (the server has no shared lib with
-// the client) so the server-side channel index buckets channels into exactly the
-// same countries the Live TV country grid shows. The presentation half
-// (countryFlag / countryName) stays client-only.
+//
+// Shared so the server-side channel index buckets channels into exactly the same
+// countries the Live TV country grid shows. The presentation half (countryFlag /
+// countryName) stays in client/src/lib/country.js and reads ALIAS from here.
 
 // Some playlists use "uk" for the United Kingdom; ISO/emoji want "gb".
-const ALIAS = { uk: 'gb', en: 'gb' };
+export const ALIAS = { uk: 'gb', en: 'gb' };
 
 // Two-letter tokens that look like country codes but aren't (quality/format tags).
 const NOT_COUNTRIES = new Set(['hd', 'sd', 'fhd', 'uhd', 'tv', 'fm', 'am', '4k', '8k', 'ip', 'eu']);
@@ -47,5 +47,3 @@ export function channelCountry(ch) {
 
   return countryFromFlag(ch && ch.name);
 }
-
-export default channelCountry;

@@ -8,8 +8,9 @@ import { createReadStream } from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { randomUUID } from 'crypto';
+import { createRequire } from 'module';
 
-import { parseM3U } from './lib/m3u.js';
+import { parseM3U } from '../shared/m3u.js';
 import {
   readCollection,
   writeCollection,
@@ -18,13 +19,14 @@ import {
   DATA_DIR,
   PLAYLIST_DIR,
 } from './lib/store.js';
-import { FETCH_HEADERS, isValidUrl, isBlockedTarget, guardedFetch } from './lib/http.js';
+import { FETCH_HEADERS, isValidUrl, isBlockedTarget, guardedFetch, fetchToBuffer } from './lib/http.js';
 import { getWantedChannels, markWantedChannelsDirty } from './lib/channels.js';
 import { suggestionsForCountries } from './lib/epgsources.js';
 import { matchGuideToChannels, matchAll, buildAltNameIndex } from './lib/epgmatch.js';
 import { loadIptvOrgIndex, warmIptvOrgDataset } from './lib/iptvorg.js';
 import { probeNowPlaying } from './lib/icy.js';
 import { generateChannelsXml, ensureChannelsXmlExists, readSidecarSummary } from './lib/channelsxml.js';
+import { proxyExtra, rewriteManifest } from './lib/manifest.js';
 import {
   fetchAndParseGuide,
   getMergedGuide,
@@ -55,13 +57,27 @@ import {
   recordingsDir,
 } from './lib/recorder.js';
 
+// The single source of truth for the version. createRequire rather than a JSON import
+// attribute: the runtime image is node 20, where that syntax is not dependable.
+const { version: APP_VERSION } = createRequire(import.meta.url)('./package.json');
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = parseInt(process.env.PORT || '56892', 10);
 const PUBLIC_DIR = process.env.PUBLIC_DIR || path.join(__dirname, 'public');
 
 const app = express();
+// Express 4 does not catch a rejected async handler: the request would hang until the
+// client gives up. Every async route is wrapped so a rejection reaches the API error
+// handler below instead.
+const asyncRoute = (handler) => (req, res, next) => Promise.resolve(handler(req, res, next)).catch(next);
 app.disable('x-powered-by');
-app.set('trust proxy', true); // honor X-Forwarded-* from a reverse proxy
+// How many reverse-proxy hops sit in front of this process (Express "trust proxy").
+// Default 0 = none: req.ip is the socket peer and X-Forwarded-* is ignored, so a
+// client cannot spoof its address past the rate limiter. Behind a TLS proxy set
+// TRUST_PROXY=1 (or the proxy's IP/CIDR) — that is also what makes req.secure true,
+// which the session cookie's Secure flag depends on.
+const TRUST_PROXY = process.env.TRUST_PROXY || '';
+app.set('trust proxy', /^\d+$/.test(TRUST_PROXY) ? parseInt(TRUST_PROXY, 10) : TRUST_PROXY || false);
 
 // ---- Security headers (§4) -----------------------------------
 // CSP is tuned to this app: scripts are external-only (no inline JS), but React
@@ -132,8 +148,6 @@ function makeLimiter(max, windowMs = 60_000) {
     max,
     standardHeaders: 'draft-7',
     legacyHeaders: false,
-    // We deliberately trust the reverse proxy (app.set('trust proxy', true)).
-    validate: { trustProxy: false },
     message: { error: 'Too many requests, please slow down.' },
   });
 }
@@ -147,7 +161,6 @@ const loginLimiter = RL_DISABLED
       max: parseInt(process.env.RL_LOGIN_MAX || '10', 10),
       standardHeaders: 'draft-7',
       legacyHeaders: false,
-      validate: { trustProxy: false },
       message: { error: 'Too many login attempts. Try again in a few minutes.' },
     });
 
@@ -183,7 +196,10 @@ function isOriginAllowed(origin) {
 
 app.use(cors({ origin: (origin, cb) => cb(null, isOriginAllowed(origin)) }));
 app.use(compression());
-app.use(express.json({ limit: '25mb' }));
+// Playlist metadata, recordings and settings are small; only raw playlist text
+// (express.text below) needs a large body, so JSON gets a much tighter ceiling.
+const JSON_BODY_LIMIT = '1mb';
+app.use(express.json({ limit: JSON_BODY_LIMIT }));
 app.use(express.text({ type: ['text/plain', 'application/x-mpegurl', 'audio/x-mpegurl'], limit: '25mb' }));
 
 // ---- Authentication (§4) -------------------------------------
@@ -231,7 +247,7 @@ app.post('/api/auth/login', loginLimiter, (req, res) => {
 // Set a new password. Allowed for an authenticated session. A bootstrap (mc)
 // session needs no current password (the session already proves bootstrap auth);
 // a normal change requires the current password. Issues a fresh, cleared cookie.
-app.post('/api/auth/password', loginLimiter, async (req, res) => {
+app.post('/api/auth/password', loginLimiter, asyncRoute(async (req, res) => {
   if (!isAuthEnabled()) return res.status(400).json({ error: 'Authentication is disabled' });
   const user = userFromRequest(req);
   if (!user) return res.status(401).json({ error: 'Authentication required' });
@@ -246,7 +262,7 @@ app.post('/api/auth/password', loginLimiter, async (req, res) => {
   const { token } = issueToken(days, false);
   res.cookie(COOKIE, token, sessionCookieOpts(req, remember ? days * 24 * 60 * 60 * 1000 : undefined));
   res.json({ ok: true, authed: true, mustChange: false, username: currentUsername() });
-});
+}));
 
 // Clear the session cookie.
 app.post('/api/auth/logout', (req, res) => {
@@ -294,12 +310,6 @@ function cacheSet(key, value) {
 function cleanHeader(v) {
   return typeof v === 'string' ? v.replace(/[\r\n]/g, '').slice(0, 512) : '';
 }
-// Query suffix that carries the same UA/Referer onto rewritten manifest URLs so
-// nested playlists, keys and segments are fetched with the same headers.
-function proxyExtra(ua, ref) {
-  return (ua ? `&ua=${encodeURIComponent(ua)}` : '') + (ref ? `&ref=${encodeURIComponent(ref)}` : '');
-}
-
 // Refuse literal private/loopback/link-local targets when PROXY_BLOCK_PRIVATE=1
 // (the predicate itself lives in lib/http.js so background fetches share it).
 // Returns false (after sending the 403) when the request should stop.
@@ -313,13 +323,13 @@ function guardTarget(target, res) {
 
 // ---- Health --------------------------------------------------------------
 app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok', time: new Date().toISOString(), version: '1.2.2' });
+  res.json({ status: 'ok', time: new Date().toISOString(), version: APP_VERSION });
 });
 
 // ---- CORS / stream proxy -------------------------------------------------
 // Streams arbitrary http(s) resources through the backend so the browser can
 // play streams that lack permissive CORS headers. Honors Range requests.
-app.all('/api/proxy', async (req, res) => {
+app.all('/api/proxy', asyncRoute(async (req, res) => {
   const target = req.query.url;
   if (!isValidUrl(target)) {
     return res.status(400).json({ error: 'Invalid or missing url parameter' });
@@ -372,34 +382,14 @@ app.all('/api/proxy', async (req, res) => {
     if (!res.headersSent) res.status(502).json({ error: 'Proxy fetch failed', detail: String(err) });
     else res.end();
   }
-});
-
-function rewriteManifest(text, manifestUrl, extra = '') {
-  const base = new URL(manifestUrl);
-  // Relative proxy URL: the browser resolves it against the manifest's own URL,
-  // so it inherits the page scheme (https) — no mixed content behind a TLS proxy,
-  // and no dependency on req.protocol (which is http inside the container).
-  // `extra` re-attaches the UA/Referer so segments inherit the same headers.
-  const proxyBase = `/api/proxy?url=`;
-  return text
-    .split('\n')
-    .map((line) => {
-      const trimmed = line.trim();
-      if (!trimmed || trimmed.startsWith('#')) {
-        // Rewrite URI="..." inside tags (keys, media, etc.)
-        return line.replace(/URI="([^"]+)"/g, (full, uri) => {
-          const abs = new URL(uri, base).toString();
-          return `URI="${proxyBase}${encodeURIComponent(abs)}${extra}"`;
-        });
-      }
-      const abs = new URL(trimmed, base).toString();
-      return proxyBase + encodeURIComponent(abs) + extra;
-    })
-    .join('\n');
-}
+}));
 
 // ---- Playlist fetch + parse ---------------------------------------------
-app.get('/api/playlist', upstreamLimiter, async (req, res) => {
+// The same ceiling the uploaded-file PUT enforces: anything larger is not a playlist.
+// Without these this was the only download that buffered an unbounded response.
+const PLAYLIST_MAX_BYTES = 64 * 1024 * 1024;
+const PLAYLIST_FETCH_TIMEOUT_MS = 30_000;
+app.get('/api/playlist', upstreamLimiter, asyncRoute(async (req, res) => {
   const target = req.query.url;
   if (!isValidUrl(target)) return res.status(400).json({ error: 'Invalid or missing url parameter' });
   if (!guardTarget(target, res)) return;
@@ -407,17 +397,22 @@ app.get('/api/playlist', upstreamLimiter, async (req, res) => {
     const cached = cacheGet(`pl:${target}`, 60 * 1000);
     let text = cached;
     if (!text) {
-      const upstream = await guardedFetch(target, { headers: FETCH_HEADERS });
-      if (!upstream.ok) return res.status(upstream.status).json({ error: `Upstream ${upstream.status}` });
-      text = await upstream.text();
+      const downloaded = await fetchToBuffer(target, {
+        timeoutMs: PLAYLIST_FETCH_TIMEOUT_MS,
+        maxBytes: PLAYLIST_MAX_BYTES,
+      });
+      text = downloaded.toString('utf8');
       cacheSet(`pl:${target}`, text);
     }
     const channels = parseM3U(text);
     res.json({ url: target, count: channels.length, channels, fetchedAt: new Date().toISOString() });
   } catch (err) {
+    // fetchToBuffer carries the upstream's own status (and 413 for an oversized
+    // response), so the passthrough this endpoint always had is preserved.
+    if (err.status) return res.status(err.status).json({ error: `Upstream ${err.status}` });
     res.status(502).json({ error: 'Failed to fetch playlist', detail: String(err) });
   }
-});
+}));
 
 // Parse uploaded/raw M3U text (POST body is text/plain).
 app.post('/api/parse', upstreamLimiter, (req, res) => {
@@ -507,7 +502,7 @@ function windowEpg(parsed, hours, lookbackHours = EPG_WINDOW_LOOKBACK_HOURS) {
 // Single-source fetch. Kept for ad-hoc guide URLs and as the client's fallback
 // when it talks to a server without /api/epg/merged. Results stay in the shared
 // memory cache only — arbitrary URLs are never persisted to the data volume.
-app.get('/api/epg', upstreamLimiter, async (req, res) => {
+app.get('/api/epg', upstreamLimiter, asyncRoute(async (req, res) => {
   const target = req.query.url;
   if (!isValidUrl(target)) return res.status(400).json({ error: 'Invalid or missing url parameter' });
   if (!guardTarget(target, res)) return;
@@ -527,12 +522,12 @@ app.get('/api/epg', upstreamLimiter, async (req, res) => {
     if (err.status) return res.status(err.status).json({ error: `Upstream ${err.status}` });
     res.status(502).json({ error: 'Failed to fetch EPG', detail: String(err) });
   }
-});
+}));
 
 // The whole guide: every configured source, merged and windowed. Served from the
 // disk-backed store, so it is warm at first paint and after a restart. The window
 // defaults to a week back / two days forward so Catchup sees its full archive.
-app.get('/api/epg/merged', upstreamLimiter, async (req, res) => {
+app.get('/api/epg/merged', upstreamLimiter, asyncRoute(async (req, res) => {
   const hours = clampWindowHours(req.query.hours, EPG_MERGED_FORWARD_HOURS);
   const lookbackHours = clampWindowHours(req.query.lookbackHours, EPG_MERGED_LOOKBACK_HOURS);
   try {
@@ -545,23 +540,23 @@ app.get('/api/epg/merged', upstreamLimiter, async (req, res) => {
   } catch (err) {
     res.status(502).json({ error: 'Failed to load EPG', detail: String(err) });
   }
-});
+}));
 
 // Known public guides for the countries this install actually has. Pure lookup —
 // no upstream traffic; validating a candidate is the separate call below.
-app.get('/api/epg/suggest', upstreamLimiter, async (req, res) => {
+app.get('/api/epg/suggest', upstreamLimiter, asyncRoute(async (req, res) => {
   try {
     const { countries } = await getWantedChannels();
     res.json(suggestionsForCountries(countries));
   } catch (err) {
     res.status(500).json({ error: 'Failed to build suggestions', detail: String(err) });
   }
-});
+}));
 
 // Try a guide URL before committing to it: download, parse, and report how much
 // of the user's channel set it covers. Nothing is persisted — a candidate the
 // user rejects leaves no trace on the data volume.
-app.post('/api/epg/validate', upstreamLimiter, async (req, res) => {
+app.post('/api/epg/validate', upstreamLimiter, asyncRoute(async (req, res) => {
   const url = (req.body && req.body.url) || '';
   const country = (req.body && req.body.country) || '';
   if (!isValidUrl(url)) return res.status(400).json({ ok: false, error: 'Enter a valid http(s) URL' });
@@ -585,7 +580,7 @@ app.post('/api/epg/validate', upstreamLimiter, async (req, res) => {
   } catch (err) {
     res.json({ ok: false, error: String(err.message || err) });
   }
-});
+}));
 
 // How much of the user's channel set the guide actually resolves, grouped by
 // country and by playlist, with the channels that missed named so they can be
@@ -651,18 +646,18 @@ async function readEpgOverrides() {
   return settings.epgOverrides && typeof settings.epgOverrides === 'object' ? settings.epgOverrides : {};
 }
 
-app.get('/api/epg/coverage', async (req, res) => {
+app.get('/api/epg/coverage', asyncRoute(async (req, res) => {
   try {
     res.json(await computeCoverage());
   } catch (err) {
     res.status(500).json({ error: 'Failed to compute coverage', detail: String(err) });
   }
-});
+}));
 
 // The alt-name tier as a flat map the client can apply while resolving channels.
 // Served only from an already-cached dataset: this is on the page-load path, so
 // it must never pay for the download — a warm runs in the background instead.
-app.get('/api/epg/altnames', async (req, res) => {
+app.get('/api/epg/altnames', asyncRoute(async (req, res) => {
   try {
     const wanted = await getWantedChannels();
     const dataset = await loadIptvOrgIndex(wanted.countries, { cachedOnly: true });
@@ -674,11 +669,11 @@ app.get('/api/epg/altnames', async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: 'Failed to build alt-name index', detail: String(err) });
   }
-});
+}));
 
 // The optional iptv-org sidecar: what the generated channels.xml covers, and
 // whether the grabber that consumes it is actually serving a guide.
-app.get('/api/epg/sidecar', async (req, res) => {
+app.get('/api/epg/sidecar', asyncRoute(async (req, res) => {
   try {
     const summary = await readSidecarSummary();
     const health = (await readSourceHealth()).find((source) => source.url === EPG_SIDECAR_URL);
@@ -692,18 +687,18 @@ app.get('/api/epg/sidecar', async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: 'Failed to read sidecar status', detail: String(err) });
   }
-});
+}));
 
 // Per-source status of the last refresh — which guides loaded, which failed and why.
-app.get('/api/epg/health', async (req, res) => {
+app.get('/api/epg/health', asyncRoute(async (req, res) => {
   res.json(await readSourceHealth());
-});
+}));
 
 // What a radio stream is playing right now, straight from the stream. Stations
 // rarely appear in an XMLTV guide, but most announce the current track over ICY.
 // Best-effort by nature: a station that says nothing answers with empty fields
 // rather than an error, so a polling client never has to treat silence as broken.
-app.get('/api/nowplaying', upstreamLimiter, async (req, res) => {
+app.get('/api/nowplaying', upstreamLimiter, asyncRoute(async (req, res) => {
   const target = req.query.url;
   if (!isValidUrl(target)) return res.status(400).json({ error: 'Invalid or missing url parameter' });
   if (!guardTarget(target, res)) return;
@@ -712,27 +707,27 @@ app.get('/api/nowplaying', upstreamLimiter, async (req, res) => {
   } catch (err) {
     res.json({ title: '', name: '', bitrate: '', genre: '', error: String(err.message || err) });
   }
-});
+}));
 
 // ---- Wanted-channels index ----------------------------------------------
 // The channels this install actually has (enabled playlists only), with the
 // countries they fall into — the scope every EPG feature filters by. Served from
 // a memoized, disk-backed index; `?refresh=1` forces a rebuild. Rate-limited with
 // the upstream limiter because a rebuild re-fetches URL playlists.
-app.get('/api/epg/channels', upstreamLimiter, async (req, res) => {
+app.get('/api/epg/channels', upstreamLimiter, asyncRoute(async (req, res) => {
   try {
     res.json(await getWantedChannels({ refresh: req.query.refresh === '1' }));
   } catch (err) {
     res.status(500).json({ error: 'Failed to build channel index', detail: String(err) });
   }
-});
+}));
 
 // ---- Playlists persistence ----------------------------------------------
-app.get('/api/playlists', async (req, res) => {
+app.get('/api/playlists', asyncRoute(async (req, res) => {
   res.json(await readCollection('playlists'));
-});
+}));
 
-app.post('/api/playlists', writeLimiter, async (req, res) => {
+app.post('/api/playlists', writeLimiter, asyncRoute(async (req, res) => {
   try {
     const body = req.body || {};
     const record = {
@@ -758,10 +753,10 @@ app.post('/api/playlists', writeLimiter, async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: 'Failed to save playlist', detail: String(err) });
   }
-});
+}));
 
 // Store the raw uploaded .m3u so the user can download the original later.
-app.put('/api/playlists/:id/file', writeLimiter, async (req, res) => {
+app.put('/api/playlists/:id/file', writeLimiter, asyncRoute(async (req, res) => {
   try {
     const fp = playlistFilePath(req.params.id);
     if (!fp) return res.status(400).json({ error: 'Bad id' });
@@ -782,10 +777,10 @@ app.put('/api/playlists/:id/file', writeLimiter, async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: 'Failed to store file', detail: String(err) });
   }
-});
+}));
 
 // Download the stored raw playlist file.
-app.get('/api/playlists/:id/file', async (req, res) => {
+app.get('/api/playlists/:id/file', asyncRoute(async (req, res) => {
   const fp = playlistFilePath(req.params.id);
   if (!fp) return res.status(400).json({ error: 'Bad id' });
   let text;
@@ -800,9 +795,9 @@ app.get('/api/playlists/:id/file', async (req, res) => {
   res.setHeader('Content-Type', 'audio/x-mpegurl');
   if (req.query.dl) res.setHeader('Content-Disposition', `attachment; filename="${safe}.m3u"`);
   res.send(text);
-});
+}));
 
-app.delete('/api/playlists/:id', writeLimiter, async (req, res) => {
+app.delete('/api/playlists/:id', writeLimiter, asyncRoute(async (req, res) => {
   try {
     await updateCollection('playlists', (list) => list.filter((p) => p.id !== req.params.id));
     const fp = playlistFilePath(req.params.id);
@@ -813,7 +808,7 @@ app.delete('/api/playlists/:id', writeLimiter, async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: 'Failed to delete playlist', detail: String(err) });
   }
-});
+}));
 
 // ---- Cross-device state sync (favourites / history / settings) -----------
 // A generic key→value collection so per-origin localStorage follows the user to
@@ -833,11 +828,11 @@ function scheduleEpgRefresh() {
   epgRefreshTimer.unref?.();
 }
 
-app.get('/api/state', async (req, res) => {
+app.get('/api/state', asyncRoute(async (req, res) => {
   res.json(await readCollection('state'));
-});
+}));
 
-app.put('/api/state/:key', writeLimiter, async (req, res) => {
+app.put('/api/state/:key', writeLimiter, asyncRoute(async (req, res) => {
   const { key } = req.params;
   if (!SYNCED_STATE_KEYS.includes(key)) return res.status(400).json({ error: 'Unknown state key' });
   const value = req.body && req.body.value;
@@ -854,7 +849,7 @@ app.put('/api/state/:key', writeLimiter, async (req, res) => {
   // waiting for the next scheduled refresh.
   if (key === SETTINGS_KEY) scheduleEpgRefresh();
   res.json(rec);
-});
+}));
 
 // ---- Recordings ----------------------------------------------------------
 const RECORDING_MAX_MINUTES = parseInt(process.env.RECORDING_MAX_MINUTES || '180', 10);
@@ -863,6 +858,8 @@ const BYTES_PER_GB = 1024 ** 3;
 const RECORDINGS_MAX_BYTES = parseFloat(process.env.RECORDINGS_MAX_GB || '0') * BYTES_PER_GB || null;
 // Statuses whose files may be pruned by retention — never an active 'recording'/'scheduled'.
 const PRUNABLE_STATUSES = new Set(['completed', 'interrupted', 'failed', 'missed']);
+// Both recording endpoints reject a bad target with the same message.
+const INVALID_STREAM_URL = 'Invalid or missing stream url';
 
 // Sum of all files currently in the recordings directory (ENOENT → 0).
 async function recordingsDirBytes() {
@@ -903,7 +900,7 @@ function onCaptureFinish(patch) {
   }).catch(() => {});
 }
 
-app.get('/api/recordings', async (req, res) => {
+app.get('/api/recordings', asyncRoute(async (req, res) => {
   const list = await readCollection('recordings');
   // Surface live-growing size for in-progress captures.
   for (const r of list) {
@@ -913,12 +910,13 @@ app.get('/api/recordings', async (req, res) => {
     }
   }
   res.json(list);
-});
+}));
 
 // Start capturing a channel "now".
-app.post('/api/recordings/start', writeLimiter, async (req, res) => {
+app.post('/api/recordings/start', writeLimiter, asyncRoute(async (req, res) => {
   const b = req.body || {};
-  if (!isValidUrl(b.url)) return res.status(400).json({ error: 'Invalid or missing stream url' });
+  if (!isValidUrl(b.url)) return res.status(400).json({ error: INVALID_STREAM_URL });
+  if (!guardTarget(b.url, res)) return;
   // Requested duration, clamped to [1, RECORDING_MAX_MINUTES]; absent/invalid → the max (today's default).
   const mins = Math.max(1, Math.min(RECORDING_MAX_MINUTES, parseInt(b.durationMinutes, 10) || RECORDING_MAX_MINUTES));
   const id = randomUUID();
@@ -955,25 +953,30 @@ app.post('/api/recordings/start', writeLimiter, async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: 'Failed to start recording', detail: String(err) });
   }
-});
+}));
 
 // Stop an in-progress capture (graceful — file is finalised on exit).
-app.post('/api/recordings/:id/stop', async (req, res) => {
+app.post('/api/recordings/:id/stop', asyncRoute(async (req, res) => {
   stopCapture(req.params.id);
   const rec = (await readCollection('recordings')).find((r) => r.id === req.params.id);
   res.json(rec || { ok: true });
-});
+}));
 
 // Schedule a future recording (EPG). The scheduler starts/stops capture at its time.
-app.post('/api/recordings', writeLimiter, async (req, res) => {
+app.post('/api/recordings', writeLimiter, asyncRoute(async (req, res) => {
   try {
     const body = req.body || {};
+    // The scheduler hands this straight to ffmpeg, so it passes the same checks the
+    // live-capture and proxy endpoints apply — a stored target is validated once here
+    // rather than at the point it is spawned.
+    if (!isValidUrl(body.url)) return res.status(400).json({ error: INVALID_STREAM_URL });
+    if (!guardTarget(body.url, res)) return;
     const record = {
       id: body.id || randomUUID(),
       channelId: body.channelId || '',
       channelName: body.channelName || 'Unknown',
       channelLogo: body.channelLogo || '',
-      url: body.url || '',
+      url: body.url,
       title: body.title || body.channelName || 'Recording',
       httpUserAgent: cleanHeader(body.httpUserAgent),
       httpReferrer: cleanHeader(body.httpReferrer),
@@ -994,10 +997,10 @@ app.post('/api/recordings', writeLimiter, async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: 'Failed to save recording', detail: String(err) });
   }
-});
+}));
 
 // Stream a finished recording for playback (Range) or download (?dl=1).
-app.get('/api/recordings/:id/file', async (req, res) => {
+app.get('/api/recordings/:id/file', asyncRoute(async (req, res) => {
   const rec = (await readCollection('recordings')).find((r) => r.id === req.params.id);
   if (!rec || !rec.filename) return res.status(404).json({ error: 'No file for this recording' });
   const filePath = resolveFile(DATA_DIR, rec.filename);
@@ -1034,9 +1037,9 @@ app.get('/api/recordings/:id/file', async (req, res) => {
   }
   res.setHeader('Content-Length', stat.size);
   createReadStream(filePath).pipe(res);
-});
+}));
 
-app.delete('/api/recordings/:id', writeLimiter, async (req, res) => {
+app.delete('/api/recordings/:id', writeLimiter, asyncRoute(async (req, res) => {
   try {
     stopCapture(req.params.id);
     const rec = (await readCollection('recordings')).find((r) => r.id === req.params.id);
@@ -1049,10 +1052,10 @@ app.delete('/api/recordings/:id', writeLimiter, async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: 'Failed to delete recording', detail: String(err) });
   }
-});
+}));
 
 // Storage meter: recordings footprint, free/total disk on the data volume, and the cap.
-app.get('/api/storage', async (req, res) => {
+app.get('/api/storage', asyncRoute(async (req, res) => {
   try {
     const recordingsBytes = await recordingsDirBytes();
     let diskFreeBytes = null;
@@ -1068,7 +1071,7 @@ app.get('/api/storage', async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: 'Failed to read storage', detail: String(err) });
   }
-});
+}));
 
 // ---- Runtime config exposed to the client --------------------------------
 app.get('/api/config', (req, res) => {
@@ -1083,7 +1086,20 @@ app.get('/api/config', (req, res) => {
 app.use(express.static(PUBLIC_DIR, { maxAge: '1h', index: false }));
 
 // SPA fallback — serve index.html for any non-API route.
-app.get(/^\/(?!api\/).*/, async (req, res) => {
+// Deliberately generic: an internal failure must not leak a stack, a path or a
+// filesystem error to the client. The detail goes to the server log instead.
+const INTERNAL_ERROR = 'Internal error';
+
+// Terminal error handler for the API: a thrown or rejected handler answers 500 rather
+// than leaving the client waiting. Mounted before the SPA fallback so it only ever
+// sees /api traffic.
+app.use('/api', (err, req, res, next) => {
+  if (res.headersSent) return next(err);
+  console.error('api:', req.method, req.originalUrl, String(err));
+  res.status(500).json({ error: INTERNAL_ERROR });
+});
+
+app.get(/^\/(?!api\/).*/, asyncRoute(async (req, res) => {
   const indexPath = path.join(PUBLIC_DIR, 'index.html');
   try {
     await fs.access(indexPath);
@@ -1094,7 +1110,7 @@ app.get(/^\/(?!api\/).*/, async (req, res) => {
       .type('html')
       .send('<h1>RO-IPTV backend running</h1><p>Frontend build not found. Run the client build or use the Docker image.</p>');
   }
-});
+}));
 
 // On boot, captures from a previous run are gone — mark them interrupted and
 // record whatever partial size landed on disk.
@@ -1170,7 +1186,25 @@ async function enforceRetention() {
 }
 
 // Start/finish scheduled (EPG) recordings at their programme times.
+//
+// setInterval fires every 30s whether or not the previous tick has finished, and a
+// tick stats every recording file before it starts anything — so on a slow volume two
+// ticks can overlap and start the same programme twice. A tick arriving while one is
+// running is DROPPED rather than queued: the next one is 30s away and sees the same
+// work, so queueing would only duplicate it.
+let schedulerTicking = false;
+
 async function tickScheduler() {
+  if (schedulerTicking) return;
+  schedulerTicking = true;
+  try {
+    await runSchedulerTick();
+  } finally {
+    schedulerTicking = false;
+  }
+}
+
+async function runSchedulerTick() {
   await enforceRetention();
   const now = Date.now();
   const list = await readCollection('recordings');
@@ -1199,11 +1233,22 @@ async function tickScheduler() {
 
 // Safety net: never let a single stray async error take the whole server down
 // (a crashed process would 500 every request, as happened with the temp-file race).
+// How long ffmpeg gets to finalise its MP4s before the process goes away. Shared by
+// the signal handlers and the uncaught-exception path.
+const SHUTDOWN_GRACE_MS = 1500;
+
 process.on('unhandledRejection', (reason) => {
   console.error('Unhandled rejection (kept alive):', reason);
 });
+// After an uncaught exception the process state is undefined (Node's own guidance):
+// timers, locks and file handles may be half-torn-down, so serving on is riskier than
+// restarting. Captures are finalised first, then the process exits non-zero and the
+// container's restart policy brings it back. The crash-loop this replaced was caused by
+// a shared temp-file race, fixed at the root by the write queue in lib/store.js.
 process.on('uncaughtException', (err) => {
-  console.error('Uncaught exception (kept alive):', err);
+  console.error('Uncaught exception, exiting:', err);
+  stopAll();
+  setTimeout(() => process.exit(1), SHUTDOWN_GRACE_MS);
 });
 
 await initAuth().catch((e) => console.error('Auth init failed:', e));
@@ -1260,6 +1305,6 @@ app.listen(PORT, '0.0.0.0', async () => {
 for (const sig of ['SIGTERM', 'SIGINT']) {
   process.on(sig, () => {
     stopAll();
-    setTimeout(() => process.exit(0), 1500);
+    setTimeout(() => process.exit(0), SHUTDOWN_GRACE_MS);
   });
 }

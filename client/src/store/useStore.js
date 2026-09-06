@@ -1,32 +1,18 @@
 import { create } from 'zustand';
 import { api, setUnauthorizedHandler } from '../lib/api';
-import { parseM3U, effectiveKind, channelId } from '../lib/m3u';
 import { uid } from '../lib/uid';
-import { channelCountry, channelCategories, countryName } from '../lib/country';
+import { channelCategories, countryName } from '../lib/country';
 import { catchupUrl } from '../lib/catchup';
 import { setAltNameIndex } from '../lib/epg';
+import { parseM3U, effectiveKind, channelId } from '@shared/m3u.js';
+import { channelCountry } from '@shared/country.js';
+import { mergeGuides } from '@shared/normalize.js';
 
 // Configured EPG source URLs (migrates the legacy single `epgUrl`).
 export function epgSources(settings = {}) {
   const list = Array.isArray(settings.epgUrls) ? settings.epgUrls : [];
   const urls = [...list, settings.epgUrl].map((u) => (u || '').trim()).filter(Boolean);
   return [...new Set(urls)];
-}
-
-// Merge several parsed EPG guides into one { channels, programmes } structure.
-function mergeEpg(guides) {
-  const channels = {};
-  const programmes = {};
-  for (const g of guides) {
-    Object.assign(channels, g.channels || {});
-    for (const [id, progs] of Object.entries(g.programmes || {})) {
-      programmes[id] = (programmes[id] || []).concat(progs);
-    }
-  }
-  for (const id of Object.keys(programmes)) {
-    programmes[id].sort((a, b) => new Date(a.start) - new Date(b.start));
-  }
-  return { channels, programmes };
 }
 
 // A playlist is "predominantly radio" if its name says so or most channels are radio.
@@ -557,7 +543,7 @@ export const useStore = create((set, get) => ({
       const results = await Promise.allSettled(urls.map((u) => api.fetchEpg(u)));
       const ok = results.filter((r) => r.status === 'fulfilled').map((r) => r.value);
       const failed = results.length - ok.length;
-      set({ epg: ok.length ? mergeEpg(ok) : null });
+      set({ epg: ok.length ? mergeGuides(ok) : null });
       if (failed) get().setToast(`${failed} of ${urls.length} EPG source(s) failed to load`);
     } catch (err) {
       get().setToast(`EPG load failed: ${err.message || err}`);
