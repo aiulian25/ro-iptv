@@ -126,24 +126,26 @@ export async function ensureChannelsXmlExists() {
  * Build DATA_DIR/epg/channels.xml from the wanted-channels index and persist a
  * summary of what was mapped. Returns that summary.
  */
-export async function generateChannelsXml(wanted) {
+let generationQueue = Promise.resolve();
+export function generateChannelsXml(wanted) {
+  // Keep the XML and its summary in invocation order. A slow earlier dataset
+  // load must not finish after a newer clear and restore removed channels.
+  const run = generationQueue.then(() => generateWantedChannelsXml(wanted));
+  generationQueue = run.catch(() => {});
+  return run;
+}
+
+async function generateWantedChannelsXml(wanted) {
+  if (wanted.incomplete || wanted.skippedPlaylists?.length || wanted.truncated) {
+    throw new Error('Channel scope is incomplete; preserving the previous sidecar file and summary');
+  }
   const generatedAt = new Date().toISOString();
   const inScope = wanted.channels.filter((channel) => channel.country);
-  if (!inScope.length) {
-    return persistSummary({
-      generatedAt,
-      written: false,
-      mapped: 0,
-      matchedChannels: 0,
-      total: 0,
-      unmapped: [],
-      unmappedCount: 0,
-      sites: [],
-    });
-  }
-
-  const index = await loadIptvOrgIndex(wanted.countries);
-  const plan = planChannelsXml(inScope, index);
+  // An authoritative empty scope is a real replacement, not a failed build.
+  // It requires no external dataset, and uses the same atomic write as a list.
+  const plan = inScope.length
+    ? planChannelsXml(inScope, await loadIptvOrgIndex(wanted.countries))
+    : { entries: [], mapped: 0, matchedChannels: 0, unmapped: [], sites: [] };
 
   await fs.mkdir(CHANNELS_XML_DIR, { recursive: true });
   await writeFileAtomic(CHANNELS_XML_PATH, renderChannelsXml(plan.entries));

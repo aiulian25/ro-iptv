@@ -10,7 +10,7 @@ import assert from 'node:assert/strict';
 import { parseEPG } from '../lib/epg.js';
 
 const CHANNEL_ID = 'c1';
-const STOP_STAMP = '20240115220000 +0000';
+const STOP_STAMP = '20240117000000 +0000';
 
 // One programme on one channel, with whatever start stamp the case needs.
 function guideXml(startStamp, extraProgrammeXml = '') {
@@ -52,34 +52,23 @@ test('a stamp without seconds parses as :00', () => {
   assert.equal(startOf('202401152030 +0200'), '2024-01-15T18:30:00.000Z');
 });
 
-// A stamp carrying no offset is read as the SERVER's local time, so its instant
-// depends on the host clock. Deliberately not pinned to a literal — asserting one
-// would pass in the UTC container and fail on a developer's machine.
-test('a stamp without an offset still yields a valid instant', () => {
-  const start = startOf('20240115203000');
-
-  assert.ok(start, 'must not be null');
-  assert.equal(start, new Date(start).toISOString(), 'must be a real ISO instant');
-  assert.match(start, /^2024-01-1[56]T/);
+test('a stamp without an offset is UTC', () => {
+  assert.equal(startOf('20240115203000'), '2024-01-15T20:30:00.000Z');
 });
 
-test('an unparseable stamp becomes null rather than an invalid date', () => {
-  // The last three are the right shape but not a real date — the parser's isNaN
-  // guard is what stops them becoming an Invalid Date downstream.
+test('invalid programme timestamps reject only the affected record', () => {
+  // Calendar and clock validation rejects shaped-but-invalid dates as well as
+  // malformed strings, without discarding other usable programmes.
   const unparseable = [
     'not-a-date',
     '',
-    '2024011520',
     '0000',
     '20241315203000 +0000',
     '20240132203000 +0000',
     '20240115253000 +0000',
   ];
   for (const stamp of unparseable) {
-    const programme = firstProgramme(guideXml(stamp));
-    assert.equal(programme.start, null, JSON.stringify(stamp));
-    // The programme itself is still kept — a bad stamp must not drop the entry.
-    assert.equal(programme.title, 'Programme');
+    assert.equal(parseEPG(guideXml(stamp)).programmes[CHANNEL_ID], undefined, JSON.stringify(stamp));
   }
 });
 
@@ -151,12 +140,12 @@ test('entity expansion cannot be used to blow up or read the host', () => {
     `<!ENTITY e "&d;&d;&d;&d;&d;&d;&d;&d;&d;&d;">` +
     `]><tv><channel id="${CHANNEL_ID}"><display-name>&e;</display-name></channel></tv>`;
 
-  // Not expanded: the name stays the reference itself, not 10^5 characters.
-  assert.ok(parseEPG(nestedEntities).channels[CHANNEL_ID].name.length < 16);
+  // Internal DTDs are refused before parsing, rather than tolerating references.
+  assert.throws(() => parseEPG(nestedEntities), /Unsupported XMLTV DTD or entity declaration/);
 
   const externalEntity =
     `<?xml version="1.0"?><!DOCTYPE tv [<!ENTITY xxe SYSTEM "file:///etc/hostname">]>` +
     `<tv><channel id="${CHANNEL_ID}"><display-name>&xxe;</display-name></channel></tv>`;
 
-  assert.throws(() => parseEPG(externalEntity), /External entities are not supported/);
+  assert.throws(() => parseEPG(externalEntity), /Unsupported XMLTV DTD or entity declaration/);
 });

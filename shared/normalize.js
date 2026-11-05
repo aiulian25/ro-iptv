@@ -31,22 +31,52 @@ export function channelIdCandidates(tvgId) {
   return base && base !== id ? [id, base] : [id];
 }
 
+// Programme titles deliberately keep punctuation, accents and edition/quality
+// annotations: channel-name normalization would collapse distinct shows.
+export function programmeAiringKey(programme) {
+  const title = String(programme.title || '').normalize('NFKC').trim().replace(/\s+/g, ' ').toLowerCase();
+  const start = Date.parse(programme.start);
+  const stop = programme.stop == null ? null : Date.parse(programme.stop);
+  if (!title || !Number.isFinite(start) || (stop !== null && (!Number.isFinite(stop) || stop <= start))) return null;
+  // Coarse timestamps must not swallow a precise airing at the same lower bound.
+  const precision = programme.timeUncertain ? [programme.startPrecision, programme.stopPrecision] : null;
+  return JSON.stringify([start, stop, title, precision]);
+}
+
+const emptyMetadata = (value) => value == null || (typeof value === 'string' && !value.trim()) ||
+  (Array.isArray(value) && value.length === 0);
+
 /**
- * Merge several parsed guides into one {channels, programmes}.
- * Shared: the browser merges the sources it fetched and the server merges the
- * ones it cached, and a channel must land in the same place either way.
+ * Exact airings merge only within the same guide channel. Configured source
+ * order wins nonempty programme-field conflicts; later sources fill gaps.
+ * Different titles/intervals stay inspectable, even when they overlap.
  */
 export function mergeGuides(guides) {
   const channels = {};
   const programmes = {};
+  const indexes = new Map();
   for (const guide of guides) {
-    Object.assign(channels, guide.channels || {});
+    for (const [id, value] of Object.entries(guide.channels || {})) Object.defineProperty(channels, id, { value, enumerable: true, writable: true, configurable: true });
     for (const [id, list] of Object.entries(guide.programmes || {})) {
-      programmes[id] = (programmes[id] || []).concat(list);
+      if (!indexes.has(id)) { indexes.set(id, new Map()); Object.defineProperty(programmes, id, { value: [], enumerable: true, writable: true, configurable: true }); }
+      const index = indexes.get(id);
+      for (const programme of list) {
+        const key = programmeAiringKey(programme);
+        const existing = key == null ? null : index.get(key);
+        if (existing) {
+          for (const [field, value] of Object.entries(programme)) {
+            if (emptyMetadata(existing[field]) && !emptyMetadata(value)) existing[field] = value;
+          }
+        } else {
+          const copy = { ...programme };
+          programmes[id].push(copy);
+          if (key != null) index.set(key, copy);
+        }
+      }
     }
   }
   for (const id of Object.keys(programmes)) {
-    programmes[id].sort((a, b) => new Date(a.start) - new Date(b.start));
+    programmes[id].sort((a, b) => Date.parse(a.start) - Date.parse(b.start));
   }
   return { channels, programmes };
 }

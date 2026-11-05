@@ -8,28 +8,6 @@ import { VitePWA } from 'vite-plugin-pwa';
 const CLIENT_DIR = fileURLToPath(new URL('.', import.meta.url));
 const SHARED_DIR = fileURLToPath(new URL('../shared', import.meta.url));
 
-// Workbox decides what to cache from the response status alone, and an authenticating
-// reverse proxy (Pangolin/Badger, Authelia, oauth2-proxy…) answers its login page with
-// a 200. Without these guards that page is stored as the app's own data and served from
-// cache long after the session is valid again. A followed redirect is the tell: our own
-// origin never redirects an API call.
-//
-// Both callbacks are STRINGIFIED into sw.js by workbox-build, so they run with none of
-// this file's scope around them: every value they use has to be written inline, and a
-// shared constant would reach the browser as a ReferenceError.
-
-// Cache only what is really ours: not redirected, and actually JSON.
-const cacheOwnJsonOnly = {
-  cacheWillUpdate: async ({ response }) =>
-    response.redirected || !/\bjson\b/.test(response.headers.get('content-type') || '') ? null : response,
-};
-
-// Logos come from arbitrary third-party CDNs, so an opaque (status 0, headerless)
-// response is normal here and must stay cacheable — only a redirect is disqualifying.
-const rejectRedirected = {
-  cacheWillUpdate: async ({ response }) => (response.redirected ? null : response),
-};
-
 export default defineConfig({
   resolve: {
     alias: { '@shared': SHARED_DIR },
@@ -63,31 +41,14 @@ export default defineConfig({
         skipWaiting: true,
         clientsClaim: true,
         cleanupOutdatedCaches: true,
-        runtimeCaching: [
-          {
-            // Channel & station logos — cache-first, long-lived.
-            urlPattern: ({ request }) => request.destination === 'image',
-            handler: 'CacheFirst',
-            options: {
-              cacheName: 'logo-cache',
-              expiration: { maxEntries: 600, maxAgeSeconds: 60 * 60 * 24 * 30 },
-              cacheableResponse: { statuses: [0, 200] },
-              plugins: [rejectRedirected],
-            },
-          },
-          {
-            // EPG / playlist API data — network-first with offline fallback to cache.
-            urlPattern: ({ url }) => url.pathname.startsWith('/api/epg') || url.pathname.startsWith('/api/playlist'),
-            handler: 'NetworkFirst',
-            options: {
-              cacheName: 'epg-cache',
-              networkTimeoutSeconds: 8,
-              expiration: { maxEntries: 50, maxAgeSeconds: 60 * 60 * 6 },
-              cacheableResponse: { statuses: [0, 200] },
-              plugins: [cacheOwnJsonOnly],
-            },
-          },
-        ],
+        // Account/source data and provider logos must not survive a session.
+        // The precached static shell remains available offline.
+        importScripts: ['/privacy-sw.js'],
+        runtimeCaching: [{
+          urlPattern: ({ url }) => url.pathname.startsWith('/api/'),
+          handler: 'NetworkOnly',
+          options: { fetchOptions: { cache: 'no-store' } },
+        }],
       },
       devOptions: { enabled: false },
     }),

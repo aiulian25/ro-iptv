@@ -38,6 +38,7 @@ function countryFromFlag(name) {
 
 // Resolve a channel's country: tvg-id suffix wins, then group-title prefix, then flag emoji.
 export function channelCountry(ch) {
+  if (/^[a-z]{2}$/i.test(ch?.country || '')) return ch.country.toLowerCase();
   const id = (ch && ch.tvgId) || '';
   const fromId = id.match(TVG_ID_RE);
   if (fromId) return fromId[1].toLowerCase();

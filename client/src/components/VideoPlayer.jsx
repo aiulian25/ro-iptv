@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, useCallback, forwardRef, useImperativeHandle } from 'react';
-import Hls from 'hls.js';
 import Icon from './Icon';
+import MiniPlayer from './MiniPlayer';
+import PreviousChannelButton from './PreviousChannelButton';
 import { attachStream } from '../lib/playSource';
 import { useMediaSession } from '../hooks/useMediaSession';
 
@@ -15,20 +16,22 @@ const fmtClock = (s) => {
 // HLS.js for .m3u8; native <video> for progressive MP4. Includes keyboard
 // shortcuts (space/f/m), fullscreen, PiP, and a quality selector.
 // Exposes an imperative handle so parents can trigger fullscreen / play.
-const VideoPlayer = forwardRef(function VideoPlayer({ channel, onPrev, onNext, onStop }, ref) {
+const VideoPlayer = forwardRef(function VideoPlayer({ channel, compact = false, preferences, onPrev, onNext, onStop, onExpand }, ref) {
   const videoRef = useRef(null);
   const hlsRef = useRef(null);
   const containerRef = useRef(null);
+  const localPreferences = useRef({ volume: 0.9, muted: false });
+  const prefs = preferences || localPreferences;
   const [levels, setLevels] = useState([]);
   const [currentLevel, setCurrentLevel] = useState(-1);
   const [error, setError] = useState(null);
   const [playing, setPlaying] = useState(false);
-  const [muted, setMuted] = useState(false);
+  const [muted, setMuted] = useState(prefs.current.muted);
   const [showQuality, setShowQuality] = useState(false);
   // Finite media (VOD/catchup) only: {cur, dur} in seconds. dur stays 0 for live.
   const [time, setTime] = useState({ cur: 0, dur: 0 });
 
-  const isHls = channel && /\.m3u8(\?|$)/i.test(channel.url || '');
+  const [streamType, setStreamType] = useState('unknown');
 
   // OS media controls (lock screen / headset / car) while the player is mounted.
   useMediaSession({ mediaRef: videoRef, channel, playing, onPrev, onNext, onStop });
@@ -36,6 +39,7 @@ const VideoPlayer = forwardRef(function VideoPlayer({ channel, onPrev, onNext, o
   useEffect(() => {
     const video = videoRef.current;
     if (!video || !channel) return;
+    video.volume = prefs.current.volume; video.muted = prefs.current.muted;
     setError(null);
     setLevels([]);
     setCurrentLevel(-1);
@@ -51,7 +55,7 @@ const VideoPlayer = forwardRef(function VideoPlayer({ channel, onPrev, onNext, o
     // transparently falling back to the proxy on a startup failure.
     const stop = attachStream(video, channel, {
       hlsRef,
-      isHls,
+      onType: setStreamType,
       hlsConfig: { lowLatencyMode: true, enableWorker: true, backBufferLength: 30 },
       onManifest: (data) => {
         setLevels(data.levels || []);
@@ -59,14 +63,10 @@ const VideoPlayer = forwardRef(function VideoPlayer({ channel, onPrev, onNext, o
       },
       onLevelSwitched: (level) => setCurrentLevel(level),
       onError: (data) => {
-        if (data.unsupported) return setError('HLS is not supported in this browser.');
-        if (data.native) return setError('This stream could not be played.');
-        if (data.type === Hls.ErrorTypes.NETWORK_ERROR) hlsRef.current?.startLoad();
-        else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) hlsRef.current?.recoverMediaError();
-        else {
-          setError('This stream could not be played.');
-          hlsRef.current?.destroy();
-        }
+        if (data.unsupportedCodec) setError('This stream uses an unsupported format or codec. Try another source.');
+        else if (data.unsupported) setError('HLS is not supported in this browser.');
+        else if (data.probeFailed) setError('The stream could not be inspected. Check access and try again.');
+        else setError('This stream could not be played. Try another source.');
       },
     });
 
@@ -74,15 +74,17 @@ const VideoPlayer = forwardRef(function VideoPlayer({ channel, onPrev, onNext, o
       video.removeEventListener('timeupdate', onTime);
       video.removeEventListener('durationchange', onTime);
       stop();
+      video.pause();
+      if (document.pictureInPictureElement === video) document.exitPictureInPicture?.().catch(() => {});
       video.removeAttribute('src');
       video.load?.();
     };
-  }, [channel, isHls]);
+  }, [channel?.id, channel?.url, channel?.httpUserAgent, channel?.httpReferrer, channel?.mimeType, channel?.contentType, channel?.streamType]);
 
   const togglePlay = useCallback(() => {
     const v = videoRef.current;
     if (!v) return;
-    if (v.paused) v.play();
+    if (v.paused) v.play().catch(() => {});
     else v.pause();
   }, []);
 
@@ -124,7 +126,9 @@ const VideoPlayer = forwardRef(function VideoPlayer({ channel, onPrev, onNext, o
   // Keyboard shortcuts
   useEffect(() => {
     const onKey = (e) => {
-      if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+      if (compact || e.defaultPrevented || e.repeat || e.altKey || e.ctrlKey || e.metaKey ||
+          document.querySelector('dialog[open]') || !containerRef.current?.contains(e.target) ||
+          e.target.closest('input, textarea, select, button, a, audio, video, [role=button], [role=link], [role=checkbox], [role=radio], [role=switch], [role=slider], [role=combobox], [role=textbox], [role=menuitem], [role=tab], [contenteditable]:not([contenteditable=false])')) return;
       if (e.key === ' ') {
         e.preventDefault();
         togglePlay();
@@ -133,7 +137,7 @@ const VideoPlayer = forwardRef(function VideoPlayer({ channel, onPrev, onNext, o
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [togglePlay, toggleFullscreen, toggleMute]);
+  }, [compact, togglePlay, toggleFullscreen, toggleMute]);
 
   const selectLevel = (idx) => {
     if (hlsRef.current) hlsRef.current.currentLevel = idx;
@@ -145,10 +149,10 @@ const VideoPlayer = forwardRef(function VideoPlayer({ channel, onPrev, onNext, o
   let badgeLabel = 'DIRECT';
   if (channel?.isCatchup) badgeLabel = 'CATCHUP';
   else if (time.dur > 0) badgeLabel = 'VOD';
-  else if (isHls) badgeLabel = 'HLS • LIVE';
+  else if (streamType === 'hls') badgeLabel = 'HLS • LIVE';
 
   return (
-    <div ref={containerRef} className="relative w-full h-full bg-black rounded-3xl overflow-hidden">
+    <div data-channel-player ref={containerRef} tabIndex={0} role="region" aria-label="Video player. Space to play or pause, F for fullscreen, M to mute." className="relative w-full h-full bg-black rounded-3xl overflow-hidden">
       <video
         ref={videoRef}
         className="w-full h-full object-contain bg-black"
@@ -157,15 +161,17 @@ const VideoPlayer = forwardRef(function VideoPlayer({ channel, onPrev, onNext, o
         controls={false}
         onPlay={() => setPlaying(true)}
         onPause={() => setPlaying(false)}
+        onVolumeChange={(event) => { const v = event.currentTarget; prefs.current = { volume: v.volume, muted: v.muted }; setMuted(v.muted); }}
       />
 
       {error && (
         <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-black/70 text-center px-6">
-          <Icon name="error" className="text-error text-5xl" />
+          <Icon aria-hidden="true" name="error" className="text-error text-5xl" />
           <p className="text-on-surface-variant">{error}</p>
         </div>
       )}
 
+      {compact ? <MiniPlayer channel={channel} playing={playing} muted={muted} onToggleMute={toggleMute} onPrev={onPrev} onNext={onNext} onStop={onStop} onTogglePlay={togglePlay} onTogglePip={togglePip} onExpand={onExpand} /> : <>
       {/* HD badge */}
       <div className="absolute top-4 right-4 glass px-3 py-1 rounded-full border border-primary/40">
         <span className="font-mono text-xs text-primary">{badgeLabel}</span>
@@ -200,17 +206,21 @@ const VideoPlayer = forwardRef(function VideoPlayer({ channel, onPrev, onNext, o
           </div>
         )}
         <div className="flex items-center gap-3">
-        <button onClick={togglePlay} className="text-white hover:text-primary">
-          <Icon name={playing ? 'pause' : 'play_arrow'} fill className="text-3xl" />
+        <button aria-label={playing ? 'Pause' : 'Play'} onClick={togglePlay} className="text-white hover:text-primary">
+          <Icon aria-hidden="true" name={playing ? 'pause' : 'play_arrow'} fill className="text-3xl" />
         </button>
-        <button onClick={toggleMute} className="text-white hover:text-primary">
-          <Icon name={muted ? 'volume_off' : 'volume_up'} className="text-2xl" />
+        <button aria-label={muted ? 'Unmute' : 'Mute'} onClick={toggleMute} className="text-white hover:text-primary">
+          <Icon aria-hidden="true" name={muted ? 'volume_off' : 'volume_up'} className="text-2xl" />
         </button>
+        <button onClick={onPrev} aria-label="Previous" className="text-white hover:text-primary"><Icon aria-hidden="true" name="skip_previous" /></button>
+        <PreviousChannelButton />
+        <button onClick={onNext} aria-label="Next" className="text-white hover:text-primary"><Icon aria-hidden="true" name="skip_next" /></button>
+        <button onClick={onStop} aria-label="Stop" className="text-white hover:text-error"><Icon aria-hidden="true" name="stop_circle" /></button>
         <div className="flex-1" />
         {levels.length > 1 && (
           <div className="relative">
-            <button onClick={() => setShowQuality((s) => !s)} className="text-white hover:text-primary flex items-center gap-1">
-              <Icon name="hd" className="text-2xl" />
+            <button aria-label="Quality" onClick={() => setShowQuality((s) => !s)} className="text-white hover:text-primary flex items-center gap-1">
+              <Icon aria-hidden="true" name="hd" className="text-2xl" />
               <span className="font-mono text-xs">
                 {currentLevel === -1 ? 'AUTO' : `${levels[currentLevel]?.height || ''}p`}
               </span>
@@ -236,14 +246,15 @@ const VideoPlayer = forwardRef(function VideoPlayer({ channel, onPrev, onNext, o
             )}
           </div>
         )}
-        <button onClick={togglePip} className="text-white hover:text-primary" title="Picture in Picture">
-          <Icon name="picture_in_picture_alt" className="text-2xl" />
+        <button onClick={togglePip} className="text-white hover:text-primary" aria-label="Picture in Picture" title="Picture in Picture">
+          <Icon aria-hidden="true" name="picture_in_picture_alt" className="text-2xl" />
         </button>
-        <button onClick={toggleFullscreen} className="text-white hover:text-primary" title="Fullscreen (f)">
-          <Icon name="fullscreen" className="text-2xl" />
+        <button onClick={toggleFullscreen} className="text-white hover:text-primary" aria-label="Fullscreen" title="Fullscreen (f)">
+          <Icon aria-hidden="true" name="fullscreen" className="text-2xl" />
         </button>
         </div>
       </div>
+      </>}
     </div>
   );
 });

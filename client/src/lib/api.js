@@ -1,3 +1,4 @@
+import { sessionFetch, sessionGeneration } from './privacy';
 // Thin client over the RO-IPTV backend API.
 const BASE = '';
 
@@ -10,32 +11,38 @@ export function setUnauthorizedHandler(fn) {
 
 async function jsonFetch(url, opts) {
   // same-origin includes the HttpOnly session cookie on every API call.
-  const res = await fetch(url, { credentials: 'same-origin', ...opts });
+  const generation = sessionGeneration();
+  const res = await sessionFetch(url, { credentials: 'same-origin', ...opts });
   if (res.status === 401) {
     onUnauthorized?.();
     throw Object.assign(new Error('Unauthorized'), { status: 401 });
   }
   if (!res.ok) {
-    let detail = '';
+    let detail = '', current;
     try {
-      detail = (await res.json()).error || '';
+      const body = await res.json(); detail = body.error || ''; current = body.current;
     } catch {
       /* ignore */
     }
     // Carry the status so callers can distinguish "endpoint absent" from
     // "rate limited" / "upstream failed" instead of retrying blindly.
-    throw Object.assign(new Error(detail || `Request failed: ${res.status}`), { status: res.status });
+    throw Object.assign(new Error(detail || `Request failed: ${res.status}`), { status: res.status, current });
   }
-  return res.json();
+  const data = await res.json();
+  if (generation !== sessionGeneration()) throw new Error('Session changed');
+  return data;
 }
 
 export const api = {
+  exportConfiguration: () => jsonFetch(`${BASE}/api/config/export`),
+  previewConfiguration: (body) => jsonFetch(`${BASE}/api/config/preview`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }),
+  restoreConfiguration: (previewId) => jsonFetch(`${BASE}/api/config/restore`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ previewId, confirmed: true }) }),
   // ---- auth ----
   authStatus: () => jsonFetch(`${BASE}/api/auth/status`),
   // Login is kept off the global 401 handler so the real error message
   // ("Invalid username or password") reaches the form.
   login: async (username, password, remember) => {
-    const res = await fetch(`${BASE}/api/auth/login`, {
+    const res = await sessionFetch(`${BASE}/api/auth/login`, {
       method: 'POST',
       credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json' },
@@ -45,14 +52,11 @@ export const api = {
     if (!res.ok) throw new Error(data.error || 'Login failed');
     return data;
   },
-  logout: () =>
-    fetch(`${BASE}/api/auth/logout`, { method: 'POST', credentials: 'same-origin' })
-      .then((r) => r.json())
-      .catch(() => ({})),
+  logout: () => jsonFetch(`${BASE}/api/auth/logout`, { method: 'POST' }),
   // Set a new password. currentPassword is only needed for a voluntary change
   // (a forced first-login change is authorised by the bootstrap session itself).
   changePassword: async (newPassword, remember, currentPassword) => {
-    const res = await fetch(`${BASE}/api/auth/password`, {
+    const res = await sessionFetch(`${BASE}/api/auth/password`, {
       method: 'POST',
       credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json' },
@@ -65,7 +69,7 @@ export const api = {
 
   config: () => jsonFetch(`${BASE}/api/config`),
 
-  fetchPlaylistFromUrl: (url) => jsonFetch(`${BASE}/api/playlist?url=${encodeURIComponent(url)}`),
+  fetchPlaylistFromUrl: (url, { refresh = false } = {}) => jsonFetch(`${BASE}/api/playlist?url=${encodeURIComponent(url)}${refresh ? '&refresh=1' : ''}`),
 
   parseText: (text) =>
     jsonFetch(`${BASE}/api/parse`, {
@@ -77,7 +81,7 @@ export const api = {
   fetchEpg: (url) => jsonFetch(`${BASE}/api/epg?url=${encodeURIComponent(url)}&hours=48`),
   // The whole guide, merged server-side from every configured source. Windowed a
   // week back so Catchup sees its archive, two days forward for Now/Next.
-  fetchEpgMerged: () => jsonFetch(`${BASE}/api/epg/merged?hours=48&lookbackHours=168`),
+  fetchEpgMerged: (revision = '') => jsonFetch(`${BASE}/api/epg/merged?hours=48&lookbackHours=168${revision ? '&sourceRevision=' + encodeURIComponent(revision) : ''}`),
   // Per-source status of the server's last guide refresh.
   epgHealth: () => jsonFetch(`${BASE}/api/epg/health`),
   // Known public guides for the countries this install has channels in.
@@ -104,13 +108,22 @@ export const api = {
 
   // Cross-device state sync (favourites / history / settings).
   listState: () => jsonFetch(`${BASE}/api/state`),
-  saveState: (key, value) =>
+  saveState: (key, value, baseUpdatedAt = 0) =>
     jsonFetch(`${BASE}/api/state/${key}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ value }),
+      body: JSON.stringify({ value, baseUpdatedAt }),
     }),
 
+  playlistChannels: (id) => jsonFetch(`${BASE}/api/playlists/${encodeURIComponent(id)}/channels`),
+  saveChannelAliases: (id, aliases) => jsonFetch(`${BASE}/api/playlists/${encodeURIComponent(id)}/aliases`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ aliases }),
+  }),
+  playlistFile: async (id) => {
+    const response = await sessionFetch(`${BASE}/api/playlists/${id}/file`, { credentials: 'same-origin' });
+    if (!response.ok) throw new Error('Failed to load playlist file');
+    return response.text();
+  },
   listPlaylists: () => jsonFetch(`${BASE}/api/playlists`),
   savePlaylist: (p) =>
     jsonFetch(`${BASE}/api/playlists`, {
@@ -118,19 +131,23 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(p),
     }),
-  deletePlaylist: (id) => jsonFetch(`${BASE}/api/playlists/${id}`, { method: 'DELETE' }),
+  deletePlaylist: (id, revision) => jsonFetch(`${BASE}/api/playlists/${encodeURIComponent(id)}?revision=${revision}`, { method: 'DELETE' }),
   // Store the raw uploaded .m3u so it can be downloaded later.
-  savePlaylistFile: (id, text) =>
-    fetch(`${BASE}/api/playlists/${id}/file`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'text/plain' },
-      body: text,
-    }).then((r) => {
-      if (!r.ok) throw new Error('Failed to store playlist file');
-    }),
+  savePlaylistFile: (id, text, metadata = {}) => {
+    const query = new URLSearchParams();
+    if (metadata.name) query.set('name', metadata.name);
+    if (metadata.contentKind) query.set('contentKind', metadata.contentKind);
+    query.set('revision', metadata.revision ?? 0);
+    query.set('operationId', metadata.operationId || id);
+    return jsonFetch(`${BASE}/api/playlists/${encodeURIComponent(id)}/file?${query}`, {
+      method: 'PUT', headers: { 'Content-Type': 'text/plain' }, body: text,
+    });
+  },
 
-  listRecordings: () => jsonFetch(`${BASE}/api/recordings`),
+  listRecordings: (options) => jsonFetch(`${BASE}/api/recordings`, options),
   // Storage meter: recordings footprint, free/total disk, and the optional cap.
+  localStations: () => jsonFetch(`${BASE}/api/local-stations`).then(result => { if (!Number.isSafeInteger(result?.revision) || result.revision < 0 || !Array.isArray(result.stations)) throw new Error('Local station management is unavailable. Update the server and reload.'); return result; }),
+  changeLocalStation: (method, body, id = '') => jsonFetch(`${BASE}/api/local-stations${id ? '/' + encodeURIComponent(id) : ''}`, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }),
   storage: () => jsonFetch(`${BASE}/api/storage`),
   // Schedule a future (EPG) recording.
   saveRecording: (r) =>
@@ -187,7 +204,8 @@ function readDirectMemo() {
 }
 
 // Record whether a URL played directly (true) or had to fall back to the proxy (false).
-export function memoDirect(url, ok) {
+export function memoDirect(url, ok, generation = sessionGeneration()) {
+  if (generation !== sessionGeneration()) return;
   try {
     const memo = readDirectMemo();
     memo[url] = ok;

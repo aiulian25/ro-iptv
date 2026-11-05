@@ -1,11 +1,14 @@
 import { useEffect } from 'react';
-import { useStore } from './store/useStore';
+import { useStore, canAccess } from './store/useStore';
 import TopNav from './components/TopNav';
 import IconSidebar from './components/IconSidebar';
 import Toast from './components/Toast';
 import InstallPrompt from './components/InstallPrompt';
 import OfflineBar from './components/OfflineBar';
-import MiniPlayer from './components/MiniPlayer';
+import PlaybackController from './components/PlaybackController';
+import SettingsDraftNotice from './components/SettingsDraftNotice';
+import StateConflictNotice from './components/StateConflictNotice';
+import { startRecordingRefresh } from './lib/recordingRefresh';
 import { clearNowPlaying } from './hooks/useMediaSession';
 import HomeView from './views/HomeView';
 import LiveView from './views/LiveView';
@@ -23,6 +26,7 @@ export default function App() {
   const restoreLastChannel = useStore((s) => s.restoreLastChannel);
   const refreshAllPlaylists = useStore((s) => s.refreshAllPlaylists);
   const loadEpg = useStore((s) => s.loadEpg);
+  const retryPlaylistChanges = useStore((s) => s.retryPlaylistChanges);
   const refreshIntervalMinutes = useStore((s) => s.settings.refreshIntervalMinutes);
   const currentChannel = useStore((s) => s.currentChannel);
 
@@ -33,15 +37,20 @@ export default function App() {
     (async () => {
       const a = await checkAuth();
       if (cancelled) return;
-      if (!a.required || a.authed) {
-        init();
-        restoreLastChannel();
+      if (canAccess(a)) {
+        await init();
+        if (!cancelled) restoreLastChannel();
       }
     })();
     return () => {
       cancelled = true;
     };
   }, [checkAuth, init, restoreLastChannel]);
+
+  const accessible = canAccess(auth);
+  useEffect(() => {
+    if (accessible) return startRecordingRefresh(useStore, { canAccess });
+  }, [accessible]);
 
   // Clear the OS now-playing card when playback is stopped entirely.
   useEffect(() => {
@@ -51,13 +60,26 @@ export default function App() {
   // Background auto-refresh of all URL playlists and the EPG guide (same cadence,
   // so Now/Next doesn't go stale during a long session).
   useEffect(() => {
-    if (!refreshIntervalMinutes) return;
+    if (!canAccess(auth) || !refreshIntervalMinutes) return;
     const id = setInterval(() => {
       refreshAllPlaylists();
       loadEpg();
     }, refreshIntervalMinutes * 60 * 1000);
     return () => clearInterval(id);
-  }, [refreshIntervalMinutes, refreshAllPlaylists, loadEpg]);
+  }, [auth, refreshIntervalMinutes, refreshAllPlaylists, loadEpg]);
+
+  useEffect(() => {
+    if (!canAccess(auth)) return;
+    const sync = () => { if (!document.hidden) void retryPlaylistChanges().catch(() => {}); };
+    window.addEventListener('focus', sync);
+    window.addEventListener('online', sync);
+    document.addEventListener('visibilitychange', sync);
+    return () => {
+      window.removeEventListener('focus', sync);
+      window.removeEventListener('online', sync);
+      document.removeEventListener('visibilitychange', sync);
+    };
+  }, [auth, retryPlaylistChanges]);
 
   // While we don't yet know the auth state, show a minimal splash (avoids a
   // flash of either the app or the login screen).
@@ -80,7 +102,7 @@ export default function App() {
   }
 
   // The left icon rail is for channel browsing — hide it on Home and Settings.
-  const showChrome = view !== 'home' && view !== 'settings';
+  const showChrome = view === 'live' || view === 'radio';
 
   return (
     <div className="min-h-screen">
@@ -95,7 +117,9 @@ export default function App() {
         {view === 'settings' && <SettingsPage />}
       </main>
 
-      <MiniPlayer />
+      <PlaybackController />
+      <SettingsDraftNotice />
+      <StateConflictNotice />
       <OfflineBar />
       <Toast />
       <InstallPrompt />

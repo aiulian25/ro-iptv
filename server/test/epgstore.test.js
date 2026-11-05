@@ -1,3 +1,4 @@
+import { sourceId } from '../lib/redact.js';
 // Server-side EPG engine (server/lib/epgstore.js).
 // DATA_DIR must be set before importing the store, which reads it at load time.
 import test from 'node:test';
@@ -98,7 +99,7 @@ test('a rejected refresh still drains its queued follow-up', async () => {
   await fs.rm(healthPath, { recursive: true, force: true });
   // If refreshQueued were stuck true, this run would spuriously chain a second one.
   const health = await refreshAll();
-  assert.equal(health[0].url, PLAIN_URL);
+  assert.equal(health[0].sourceId, sourceId(PLAIN_URL));
   assert.equal(health[0].ok, true);
 });
 
@@ -131,6 +132,18 @@ test('mergeGuides unions channels and sorts each channel programmes by start', (
     merged.programmes.a.map((p) => p.title),
     ['Earlier', 'Later']
   );
+});
+
+test('overlapping source airings merge once with stable metadata precedence and retain conflicts', () => {
+  const entry = { title: 'One', start: '2026-07-01T12:00:00Z', stop: '2026-07-01T13:00:00Z', desc: '' };
+  const next = { ...entry, title: 'Two', start: '2026-07-01T13:00:00Z', stop: '2026-07-01T14:00:00Z' };
+  const merged = mergeGuides([
+    { programmes: { a: [entry, next] } },
+    { programmes: { a: [{ ...entry, desc: 'Richer detail' }, next, { ...entry, title: 'Conflict' }] } },
+  ]);
+  assert.deepEqual(merged.programmes.a.map(p => p.title), ['One', 'Conflict', 'Two']);
+  assert.equal(merged.programmes.a[0].desc, 'Richer detail');
+  assert.equal(entry.desc, '');
 });
 
 test('a source is fetched, parsed, persisted and then served without refetching', async () => {
@@ -183,8 +196,8 @@ test('refreshAll records per-source health and keeps serving the good source', a
 
   const health = await refreshAll();
 
-  const good = health.find((source) => source.url === PLAIN_URL);
-  const bad = health.find((source) => source.url === DEAD_URL);
+  const good = health.find((source) => source.sourceId === sourceId(PLAIN_URL));
+  const bad = health.find((source) => source.sourceId === sourceId(DEAD_URL));
   assert.equal(good.ok, true);
   assert.equal(good.channelCount, 1);
   assert.equal(bad.ok, false);

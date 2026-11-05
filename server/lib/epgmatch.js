@@ -1,14 +1,9 @@
 // How much of the user's channel set a guide actually covers.
 //
 // Exact tvg-id first, then a normalized display-name match — the same resolution
-// the browser performs, because both sides use shared/normalize.js.
+// the browser performs, because both sides use shared/epg-resolution.js.
 
-import { normalizeName, channelIdCandidates } from '../../shared/normalize.js';
-
-// An epg.channels value is {name, icon}; older cached shapes were a bare string.
-function channelDisplayName(value) {
-  return typeof value === 'string' ? value : value?.name || '';
-}
+import { resolveGuideChannel, guideNameIndex } from '../../shared/epg-resolution.js';
 
 /**
  * Which of `channels` the guide covers.
@@ -20,16 +15,6 @@ export function matchGuideToChannels(guide, channels) {
   const results = matchAll(channels, guide);
   const unmatched = results.filter((result) => !result.matchedKey).map((result) => result.name);
   return { matched: results.length - unmatched.length, total: channels.length, unmatched };
-}
-
-// Normalized display name -> guide channel id, built once per guide.
-function guideNameToId(guide) {
-  const index = new Map();
-  for (const [id, value] of Object.entries(guide.channels || {})) {
-    const key = normalizeName(channelDisplayName(value));
-    if (key && !index.has(key)) index.set(key, id);
-  }
-  return index;
 }
 
 /**
@@ -45,7 +30,7 @@ function guideNameToId(guide) {
 export function buildAltNameIndex(dataset, guide) {
   if (!dataset) return {};
   const guideIds = new Set([...Object.keys(guide.channels || {}), ...Object.keys(guide.programmes || {})]);
-  const guideNames = guideNameToId(guide);
+  const guideNames = guideNameIndex(guide);
   const altNames = {};
   for (const names of dataset.byCountryName.values()) {
     for (const [normalized, channel] of names) {
@@ -64,29 +49,12 @@ export function buildAltNameIndex(dataset, guide) {
  * @returns {Array<{channelId, name, tvgId, country, playlistId, matchedKey, method}>}
  */
 export function matchAll(wantedChannels, guide, overrides = {}, altNames = {}) {
-  const guideChannels = guide.channels || {};
-  const guideProgrammes = guide.programmes || {};
-  const guideNames = guideNameToId(guide);
-
-  return wantedChannels.map((channel) => {
-    const base = {
-      channelId: channel.id,
-      name: channel.name,
-      tvgId: channel.tvgId || '',
-      country: channel.country || '',
-      playlistId: channel.playlistId || '',
-    };
-    const override = overrides[channel.id];
-    if (override) return { ...base, matchedKey: override, method: 'override' };
-    const byId = channelIdCandidates(channel.tvgId).find(
-      (candidate) => guideChannels[candidate] || guideProgrammes[candidate]
-    );
-    if (byId) return { ...base, matchedKey: byId, method: 'tvgId' };
-    const normalized = normalizeName(channel.tvgName || channel.name);
-    const byName = guideNames.get(normalized);
-    if (byName) return { ...base, matchedKey: byName, method: 'name' };
-    const byAltName = altNames[normalized];
-    if (byAltName) return { ...base, matchedKey: byAltName, method: 'altName' };
-    return { ...base, matchedKey: null, method: null };
-  });
+  return wantedChannels.map((channel) => ({
+    channelId: channel.id,
+    name: channel.name,
+    tvgId: channel.tvgId || '',
+    country: channel.country || '',
+    playlistId: channel.playlistId || '',
+    ...resolveGuideChannel(guide, channel, overrides, altNames),
+  }));
 }

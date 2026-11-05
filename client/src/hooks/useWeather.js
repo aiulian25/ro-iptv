@@ -25,37 +25,39 @@ const WMO = {
   99: ['Thunderstorm', 'thunderstorm'],
 };
 
-async function reverseName(lat, lon) {
-  try {
-    const r = await fetch(
-      `https://geocoding-api.open-meteo.com/v1/search?count=1&latitude=${lat}&longitude=${lon}`
-    );
-    const j = await r.json();
-    return j?.results?.[0]?.name;
-  } catch {
-    return null;
-  }
-}
-
 // Open-Meteo (no API key). Auto-detects location via geolocation, IP fallback.
 export function useWeather() {
   const [weather, setWeather] = useState(null);
 
   useEffect(() => {
     let cancelled = false;
+    const controllers = new Set();
+    let geoTimer;
+    const validLocation = (lat, lon) => Number.isFinite(lat) && Number.isFinite(lon) && Math.abs(lat) <= 90 && Math.abs(lon) <= 180;
+    async function json(url) {
+      if (cancelled) throw new Error('Weather cancelled');
+      const controller = new AbortController(); controllers.add(controller);
+      const timer = setTimeout(() => controller.abort(), 3000);
+      try {
+        const response = await fetch(url, { signal: controller.signal });
+        if (!response.ok) throw new Error('Weather unavailable');
+        return await response.json();
+      } finally { clearTimeout(timer); controllers.delete(controller); controller.abort(); }
+    }
 
     async function fetchFor(lat, lon, place) {
+      if (cancelled || !validLocation(lat, lon)) return;
       try {
-        const r = await fetch(
+        const j = await json(
           `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current=temperature_2m,weather_code`
         );
-        const j = await r.json();
         if (cancelled) return;
-        const code = j?.current?.weather_code ?? 0;
+        const code = j?.current?.weather_code, temp = j?.current?.temperature_2m;
+        if (!Number.isFinite(code) || !Number.isFinite(temp)) return;
         const [label, icon] = WMO[code] || ['—', 'cloud'];
-        const name = place || (await reverseName(lat, lon)) || 'Local';
+        const name = place || 'Local';
         if (!cancelled)
-          setWeather({ temp: Math.round(j?.current?.temperature_2m ?? 0), label, icon, place: name });
+          setWeather({ temp: Math.round(temp), label, icon, place: name });
       } catch {
         /* ignore */
       }
@@ -71,9 +73,9 @@ export function useWeather() {
       ];
       for (const s of sources) {
         try {
-          const r = await fetch(s.url);
-          const loc = s.pick(await r.json());
-          if (loc && loc.lat != null && !Number.isNaN(loc.lat)) {
+          if (cancelled) return;
+          const loc = s.pick(await json(s.url));
+          if (loc && validLocation(loc.lat, loc.lon)) {
             fetchFor(loc.lat, loc.lon, loc.city);
             return;
           }
@@ -83,18 +85,21 @@ export function useWeather() {
       }
     }
 
+    let fallbackStarted = false;
+    const fallback = () => { if (fallbackStarted || cancelled) return; fallbackStarted = true; clearTimeout(geoTimer); void ipFallback(); };
     if ('geolocation' in navigator) {
+      geoTimer = setTimeout(fallback, 6500);
       navigator.geolocation.getCurrentPosition(
-        (pos) => fetchFor(pos.coords.latitude, pos.coords.longitude),
-        () => ipFallback(),
+        (pos) => { clearTimeout(geoTimer); if (fallbackStarted || cancelled) return; if (validLocation(pos.coords.latitude, pos.coords.longitude)) void fetchFor(pos.coords.latitude, pos.coords.longitude); else fallback(); },
+        fallback,
         { timeout: 6000, maximumAge: 600000 }
       );
     } else {
-      ipFallback();
+      fallback();
     }
 
     return () => {
-      cancelled = true;
+      cancelled = true; clearTimeout(geoTimer); for (const controller of controllers) controller.abort();
     };
   }, []);
 

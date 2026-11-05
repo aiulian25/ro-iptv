@@ -1,3 +1,4 @@
+import { assignChannelIdentities, identityHash, channelRoute } from './channel-identity.js';
 // Minimal, dependency-free M3U / M3U8 (EXTM3U) playlist parser.
 // Extracts: name, group-title, tvg-id, tvg-name, tvg-logo, and the stream URL.
 //
@@ -22,7 +23,8 @@ function hashStr(s) {
 // Content-derived channel id — stable across playlist refreshes regardless of
 // ordering. `seen` (a Map) deduplicates identical (tvgId,name,url) tuples within
 // one playlist by suffixing -2, -3, …
-export function channelId(channel, seen) {
+// Retained only for v2 migration aliases; new parser results use v3 identities.
+export function legacyChannelId(channel, seen = new Map()) {
   const slug = String(channel.tvgId || channel.name)
     .replace(/[^a-zA-Z0-9-_]/g, '_')
     .slice(0, 40);
@@ -31,6 +33,14 @@ export function channelId(channel, seen) {
   seen.set(id, duplicates + 1);
   if (duplicates) id = `${id}-${duplicates + 1}`;
   return id;
+}
+
+// Standalone callers get the same v3 base identity. The parser finalizes the
+// whole set below so duplicate guide IDs use safe variant discrimination.
+export function channelId(channel, seen = new Map()) {
+  const key=channel.tvgId ? 'guide:'+channel.tvgId : 'route:'+channelRoute(channel);
+  const base='c3-'+identityHash(key),n=seen.get(base)||0;seen.set(base,n+1);
+  return n?base+'-'+(n+1):base;
 }
 
 // The channel name is whatever follows the first comma that is NOT inside a quoted
@@ -104,6 +114,7 @@ export function parseM3U(text = '') {
         httpUserAgent: attrs['http-user-agent'] || '',
         httpReferrer: attrs['http-referrer'] || '',
         radio: attrs['radio'] === 'true',
+        country: /^[a-z]{2}$/i.test(attrs['tvg-country'] || '') ? attrs['tvg-country'].toLowerCase() : '',
         chno: Number.isNaN(channelNumber) ? null : channelNumber,
         tvgShift: parseFloat(attrs['tvg-shift']) || 0,
         catchup: attrs['catchup'] || '',
@@ -147,6 +158,7 @@ export function parseM3U(text = '') {
         httpUserAgent: base.httpUserAgent || '',
         httpReferrer: base.httpReferrer || '',
         radio: base.radio,
+        ...(base.country ? { country: base.country } : {}),
         chno: base.chno,
         tvgShift: base.tvgShift,
         catchup: base.catchup,
@@ -157,7 +169,7 @@ export function parseM3U(text = '') {
       current = null;
     }
   }
-  return channels;
+  return assignChannelIdentities(channels);
 }
 
 export default parseM3U;

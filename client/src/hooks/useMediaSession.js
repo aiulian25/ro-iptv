@@ -4,11 +4,8 @@ import { useEffect } from 'react';
 // handlers (play/pause/stop/prev/next) that surface on the lock screen,
 // notification, Bluetooth/headset buttons, car head-unit, watch and media keys.
 //
-// Several players can be mounted at once (the in-view player + the always-mounted
-// mini-player), but the OS Media Session is a single global. So handlers are
-// installed ONCE and indirect through a module-level "controller" that points at
-// whichever player is currently active. Only the player with a non-null channel
-// writes to it, and at most one is active at a time.
+// One App-level playback owner supplies the current element. View changes only
+// replace controls; the OS session keeps pointing at the same live element.
 
 const hasMS = typeof navigator !== 'undefined' && 'mediaSession' in navigator;
 let handlersInstalled = false;
@@ -29,16 +26,6 @@ function installHandlers() {
   set('stop', () => ctl.onStop?.());
   set('previoustrack', () => ctl.onPrev?.());
   set('nexttrack', () => ctl.onNext?.());
-
-  // If the browser paused the media while hidden, resume it when the user comes
-  // back to the app (so it doesn't sit silently paused after backgrounding).
-  document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState !== 'visible') return;
-    const el = ctl.mediaRef?.current;
-    if (el && el.paused && navigator.mediaSession.playbackState === 'playing') {
-      el.play().catch(() => {});
-    }
-  });
 }
 
 // Clear the OS now-playing card (call when nothing is playing).

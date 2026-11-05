@@ -171,10 +171,10 @@ test('rendered XML escapes every entity and is well formed', () => {
   assert.ok(!/[<>&](?![a-z]+;)/.test(xml.split('\n')[2].replace(/<\/?channel[^>]*>?/g, '')));
 });
 
-test('generate with no located channels writes nothing and records why', async () => {
+test('generate with no located channels writes valid empty XML and a zero summary', async () => {
   const summary = await generateChannelsXml({ countries: [], channels: [{ name: 'No Country', country: '' }] });
 
-  assert.equal(summary.written, false);
+  assert.equal(summary.written, true);
   assert.equal(summary.mapped, 0);
   assert.deepEqual(await readSidecarSummary(), summary);
   assert.equal(
@@ -182,6 +182,9 @@ test('generate with no located channels writes nothing and records why', async (
       .access(path.join(DATA_DIR, 'epg', 'channels.xml'))
       .then(() => true)
       .catch(() => false),
-    false
+    true
   );
 });
+
+// This suite owns its data directory, including on failed assertions.
+test.after(() => fs.rm(DATA_DIR, { recursive: true, force: true }));

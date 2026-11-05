@@ -10,26 +10,36 @@ export function proxyExtra(ua, ref) {
   return (ua ? `&ua=${encodeURIComponent(ua)}` : '') + (ref ? `&ref=${encodeURIComponent(ref)}` : '');
 }
 
-export function rewriteManifest(text, manifestUrl, extra = '') {
+export function rewriteManifest(text, manifestUrl, extra = '', maxBytes = Infinity) {
   const base = new URL(manifestUrl);
   // Relative proxy URL: the browser resolves it against the manifest's own URL,
   // so it inherits the page scheme (https) — no mixed content behind a TLS proxy,
   // and no dependency on req.protocol (which is http inside the container).
   // `extra` re-attaches the UA/Referer so segments inherit the same headers.
   const proxyBase = `/api/proxy?url=`;
+  let bytes = 0;
   return text
     .split('\n')
     .map((line) => {
+      const budget = (value) => {
+        bytes += Buffer.byteLength(value) + 1;
+        if (bytes > maxBytes) throw new Error('Rewritten manifest too large');
+        return value;
+      };
       const trimmed = line.trim();
       if (!trimmed || trimmed.startsWith('#')) {
         // Rewrite URI="..." inside tags (keys, media, etc.)
-        return line.replace(/URI="([^"]+)"/g, (full, uri) => {
+        let lineBytes = Buffer.byteLength(line);
+        return budget(line.replace(/URI="([^"]+)"/g, (full, uri) => {
           const abs = new URL(uri, base).toString();
-          return `URI="${proxyBase}${encodeURIComponent(abs)}${extra}"`;
-        });
+          const replacement = `URI="${proxyBase}${encodeURIComponent(abs)}${extra}"`;
+          lineBytes += Buffer.byteLength(replacement) - Buffer.byteLength(full);
+          if (bytes + lineBytes + 1 > maxBytes) throw new Error('Rewritten manifest too large');
+          return replacement;
+        }));
       }
       const abs = new URL(trimmed, base).toString();
-      return proxyBase + encodeURIComponent(abs) + extra;
+      return budget(proxyBase + encodeURIComponent(abs) + extra);
     })
     .join('\n');
 }

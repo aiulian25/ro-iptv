@@ -99,3 +99,22 @@ body {
   background: #c0c1ff;
   border-radius: 2px;
 }
+
+/* Keyboard focus remains visible on glass and clipped timeline cards. */
+:where(button, a, input, select, textarea, [tabindex]):focus-visible {
+  outline: 2px solid #c0c1ff;
+  outline-offset: -2px;
+}
+.app-dialog::backdrop {
+  background: rgba(0, 0, 0, 0.8);
+  backdrop-filter: blur(4px);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

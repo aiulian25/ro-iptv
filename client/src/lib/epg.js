@@ -1,5 +1,8 @@
 // EPG helpers operating on the parsed structure returned by the backend.
-import { normalizeName, channelIdCandidates } from '@shared/normalize.js';
+import { programmeInWindow, canScheduleProgramme } from '@shared/epg-time.js';
+export { programmeInWindow, canScheduleProgramme };
+import { normalizeName, programmeAiringKey } from '@shared/normalize.js';
+import { resolveGuideChannel, guideNameIndex } from '@shared/epg-resolution.js';
 
 export function findNowNext(programmes = [], at = new Date()) {
   if (!programmes || !programmes.length) return { now: null, next: null };
@@ -10,9 +13,14 @@ export function findNowNext(programmes = [], at = new Date()) {
     const p = programmes[i];
     const start = p.start ? new Date(p.start).getTime() : 0;
     const stop = p.stop ? new Date(p.stop).getTime() : 0;
-    if (start <= t && t < stop) {
+    if (!p.timeUncertain && start <= t && t < stop) {
       now = p;
-      next = programmes[i + 1] || null;
+      const key = programmeAiringKey(p);
+      // Old server/cache responses can still contain duplicates. Next starts
+      // after this airing ends; conflicting overlaps remain in the guide.
+      next = programmes.slice(i + 1).find((candidate) =>
+        Date.parse(candidate.start) >= stop &&
+        (key == null || programmeAiringKey(candidate) !== key)) || null;
       break;
     }
     if (start > t) {
@@ -60,17 +68,6 @@ export function fmtTime(iso) {
 
 const MS_PER_HOUR = 3_600_000;
 
-// An epg.channels value is `{name, icon}` (current) or a bare display-name string
-// (an old-shape response still cached by the service worker). Normalize to the name.
-function channelName(value) {
-  return typeof value === 'string' ? value : value?.name || '';
-}
-
-// Normalized display name → channel id, built once per guide object. A new guide
-// is a new object, so the cache invalidates itself; without it every unmatched
-// channel rescanned the whole guide on every render of every row.
-const nameIndexCache = new WeakMap();
-
 // The alt-name tier, shared by every caller: it is one property of the loaded
 // guide, not per-component state. Set once when the guide loads (see loadEpg),
 // the same way api.js registers its unauthorized handler.
@@ -80,35 +77,10 @@ export function setAltNameIndex(index) {
   sharedAltNames = index && typeof index === 'object' ? index : {};
 }
 
-function nameIndexFor(epg) {
-  let index = nameIndexCache.get(epg);
-  if (index) return index;
-  index = new Map();
-  for (const [id, value] of Object.entries(epg.channels || {})) {
-    const key = normalizeName(channelName(value));
-    if (key && !index.has(key)) index.set(key, id);
-  }
-  nameIndexCache.set(epg, index);
-  return index;
-}
-
 // Normalized display-name → channel id, or '' when no channel matches.
 function channelIdByName(epg, name) {
   const target = normalizeName(name);
-  return target ? nameIndexFor(epg).get(target) || '' : '';
-}
-
-// Resolve a channel to its EPG key: explicit user override, then exact tvg-id,
-// then a normalized display-name match, then an iptv-org alternative name (a
-// guide that calls a channel something the playlist does not).
-function resolveKey(epg, channel, overrides, altNames) {
-  const override = overrides[channel.id];
-  if (override) return override;
-  const byId = channelIdCandidates(channel.tvgId).find((candidate) => epg.programmes[candidate]);
-  if (byId) return byId;
-  const normalized = normalizeName(channel.tvgName || channel.name);
-  if (!normalized) return '';
-  return nameIndexFor(epg).get(normalized) || altNames[normalized] || '';
+  return target ? guideNameIndex(epg).get(target) || '' : '';
 }
 
 // The EPG channel-icon URL for a channel (logo fallback when the playlist has no
@@ -125,10 +97,55 @@ export function epgIconFor(epg, channel) {
 // tvg-id, then normalized name. A channel's tvg-shift (hours) offsets the times.
 export function programmesForChannel(epg, channel, overrides = {}, altNames = sharedAltNames) {
   if (!epg || !channel) return [];
-  const key = resolveKey(epg, channel, overrides, altNames);
-  const programmes = (key && epg.programmes[key]) || [];
+  const key = resolveGuideChannel(epg, channel, overrides, altNames).matchedKey;
+  const programmes = (key && epg.programmes?.[key]) || [];
   if (!programmes.length || !channel.tvgShift) return programmes;
   const shiftMs = channel.tvgShift * MS_PER_HOUR;
   const shifted = (iso) => (iso ? new Date(Date.parse(iso) + shiftMs).toISOString() : iso);
   return programmes.map((p) => ({ ...p, start: shifted(p.start), stop: shifted(p.stop) }));
+}
+
+export function fmtProgrammeTime(programme) {
+  const range = `${fmtTime(programme.start)}–${programme.stop ? fmtTime(programme.stop) : 'End unknown'}`;
+  return programme.timeUncertain ? `Approx. ${range}` : range;
+}
+
+// Calendar boundaries use the viewer's timezone, including 23/25-hour DST days.
+// "Next 2 days" means today and tomorrow, rather than an assumed 48-hour day.
+export function programmeSearchWindow(at = new Date(), days = 1) {
+  const start = new Date(at); start.setHours(0, 0, 0, 0);
+  const end = new Date(start); end.setDate(end.getDate() + (days === 2 ? 2 : 1));
+  return { from: start.getTime(), to: end.getTime() };
+}
+
+const searchText = value => String(value || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+export const PROGRAMME_SEARCH_LIMIT = 200;
+
+// Scan the already loaded guide without building a second catalogue. Retain only
+// the earliest bounded results; total still describes every matching airing.
+export function searchProgrammes(epg, channels, query, { at = new Date(), days = 1, overrides = {}, limit = PROGRAMME_SEARCH_LIMIT } = {}) {
+  const words = searchText(query).trim().slice(0, 200).split(/\s+/).filter(Boolean);
+  if (!epg || !words.length) return { results: [], total: 0 };
+  limit = Number.isInteger(limit) ? Math.max(1, Math.min(limit, PROGRAMME_SEARCH_LIMIT)) : PROGRAMME_SEARCH_LIMIT;
+  const { from, to } = programmeSearchWindow(at, days);
+  const results = []; let total = 0;
+  const compare = (a, b) => Date.parse(a.programme.start) - Date.parse(b.programme.start) || a.channel.name.localeCompare(b.channel.name) || a.key.localeCompare(b.key);
+  for (const channel of channels) {
+    const seen = new Set();
+    for (const programme of programmesForChannel(epg, channel, overrides)) {
+      if (!programmeInWindow(programme, from, to)) continue;
+      const text = searchText(`${programme.title || ''} ${programme.subTitle || ''}`);
+      if (!words.every(word => text.includes(word))) continue;
+      const airing = programmeAiringKey(programme) || JSON.stringify([programme.start, programme.stop, programme.title, programme.subTitle]);
+      if (seen.has(airing)) continue;
+      seen.add(airing); total++;
+      const row = { channel, programme, key: JSON.stringify([channel.id, airing]) };
+      if (results.length === limit && compare(row, results[limit - 1]) >= 0) continue;
+      let low = 0, high = results.length;
+      while (low < high) { const mid = (low + high) >>> 1; if (compare(results[mid], row) <= 0) low = mid + 1; else high = mid; }
+      results.splice(low, 0, row);
+      if (results.length > limit) results.pop();
+    }
+  }
+  return { results, total };
 }

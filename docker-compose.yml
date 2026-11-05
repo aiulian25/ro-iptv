@@ -1,8 +1,8 @@
 # RO-IPTV — ready-to-deploy stack.
 #
-# Pulls the prebuilt MULTI-ARCH image (linux/amd64 + linux/arm64) from GHCR — no
-# build needed. The right image for your hardware (PC, mini-PC, Synology, ARM
-# board, server) is selected automatically.
+# Pulls the prebuilt linux/amd64 image from GHCR — no build needed. For ARM
+# hardware there is no published image: build from source with
+# docker-compose.build.yml instead.
 #
 #   docker compose up -d        # start
 #   docker compose pull && docker compose up -d   # update to the latest image
@@ -18,9 +18,11 @@ services:
 
     ports:
       # host:container — open the app at http://<your-host>:56892
-      - "56892:56892"
+      - "${PORT:-56892}:${PORT:-56892}"
 
     environment:
+      - PORT=${PORT:-56892}
+      - DATA_DIR=/data
       # Timezone (affects the clock and EPG times).
       - TZ=${TZ:-Europe/London}
 
@@ -30,8 +32,14 @@ services:
       # default stops working afterwards. To run with NO login, set
       # AUTH_PASSWORD to an empty value.
       - AUTH_USERNAME=${AUTH_USERNAME:-admin}
-      - AUTH_PASSWORD=${AUTH_PASSWORD:-admin}
+      - AUTH_PASSWORD=${AUTH_PASSWORD-admin}
       - AUTH_SESSION_DAYS=${AUTH_SESSION_DAYS:-30}
+      - RL_LOGIN_MAX=${RL_LOGIN_MAX:-10}
+      - RL_WRITE_MAX=${RL_WRITE_MAX:-120}
+      - RL_UPSTREAM_MAX=${RL_UPSTREAM_MAX:-120}
+      - RATE_LIMIT_DISABLED=${RATE_LIMIT_DISABLED:-}
+      - HSTS_MAX_AGE=${HSTS_MAX_AGE:-15552000}
+      - AUTH_SESSION_SECRET=${AUTH_SESSION_SECRET:-}
 
       # --- Optional ---------------------------------------------------------
       # Auto-load a playlist / EPG on first start:
@@ -40,6 +48,8 @@ services:
       - REFRESH_INTERVAL_MINUTES=${REFRESH_INTERVAL_MINUTES:-360}
       # Max length of a single recording, in minutes (auto-stops at the cap):
       - RECORDING_MAX_MINUTES=${RECORDING_MAX_MINUTES:-180}
+      - RECORDING_MAX_CONCURRENT=${RECORDING_MAX_CONCURRENT:-4}
+      - RECORDING_INPUT_IDLE_SECONDS=${RECORDING_INPUT_IDLE_SECONDS:-30}
       # Optional total-storage cap for recordings in GB (prunes oldest finished; blank = no cap):
       - RECORDINGS_MAX_GB=${RECORDINGS_MAX_GB:-}
       # Lock the API to specific origins (comma-separated host / host:port /
@@ -48,11 +58,13 @@ services:
       # Set 1 to refuse proxy/playlist/EPG fetches to private/loopback addresses
       # (SSRF hardening). Leave blank if you use LAN IPTV sources:
       - PROXY_BLOCK_PRIVATE=${PROXY_BLOCK_PRIVATE:-}
+      - PROXY_ALLOWED_CIDRS=${PROXY_ALLOWED_CIDRS:-}
       # Reverse-proxy hops to trust for the client IP and HTTPS detection.
       # Empty = trust none. Set 1 when a TLS proxy sits in front.
       - TRUST_PROXY=${TRUST_PROXY:-}
-      # Points at the optional grabber below. Harmless when it is not running.
-      - EPG_SIDECAR_URL=${EPG_SIDECAR_URL:-http://epg:3000/guide.xml}
+      # Off unless explicitly enabled. The EPG overlay enables and starts it.
+      - EPG_SIDECAR_ENABLED=${EPG_SIDECAR_ENABLED:-0}
+      - EPG_SIDECAR_URL=${EPG_SIDECAR_URL:-}
       # A country EPG pack is ~13 MB gzipped but ~72 MB of XML, and parsing it
       # peaks near 900 MB. Node only claims ~half the cgroup limit by default,
       # so the ceiling is set explicitly and the limit sized to fit it.
@@ -84,7 +96,7 @@ services:
         hard: ${NOFILE_HARD:-8192}
 
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:56892/api/health"]
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:${PORT:-56892}/api/health"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -93,51 +105,6 @@ services:
       start_period: 15s
 
     logging:                         # cap log growth so it can't fill the disk
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
-
-  epg:
-    image: ghcr.io/iptv-org/epg:master
-    # Opt-in: only starts with `docker compose --profile epg up -d`.
-    profiles: ["epg"]
-    container_name: ro-iptv-epg
-    restart: unless-stopped
-    # The channel list below is mounted from the app's volume, and a mount of a
-    # path that does not exist yet stops this container starting. The app creates
-    # the file as soon as it boots, so wait for it to be up before mounting.
-    depends_on:
-      ro-iptv:
-        condition: service_healthy
-    environment:
-      # REQUIRED. The grabber allocates several GB while it loads the iptv-org
-      # dataset, before it fetches anything; with node's default ceiling (~4 GB)
-      # it dies with "JavaScript heap out of memory" no matter how few channels
-      # are listed. Steady state afterwards is ~110 MB.
-      - NODE_OPTIONS=--max-old-space-size=${EPG_HEAP_MB:-8192}
-      # Nightly at 03:00. The grab takes a while — it scrapes one site at a time.
-      - CRON_SCHEDULE=${EPG_CRON_SCHEDULE:-0 3 * * *}
-      # How many days ahead to grab. 3 covers Now/Next plus the guide grid.
-      - DAYS=${EPG_DAYS:-3}
-      # The image default. Raising it multiplies the peak memory above.
-      - MAX_CONNECTIONS=${EPG_MAX_CONNECTIONS:-1}
-      - GZIP=true
-      # Grab once on start so a fresh stack has a guide without waiting for cron.
-      - RUN_AT_STARTUP=true
-      - TZ=${TZ:-Europe/London}
-    volumes:
-      # The app-generated channel list, mounted as the grabber's input.
-      - type: volume
-        source: data
-        target: /epg/public/channels.xml
-        volume:
-          subpath: epg/channels.xml
-    security_opt:
-      - no-new-privileges:true
-    cap_drop:
-      - ALL
-    logging:
       driver: json-file
       options:
         max-size: "10m"

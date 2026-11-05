@@ -5,6 +5,9 @@ import BrandMark from '../components/BrandMark';
 
 export default function LoginView() {
   const login = useStore((s) => s.login);
+  const notice = useStore((s) => s.auth.notice);
+  const logout = useStore((s) => s.logout);
+  const checkAuth = useStore((s) => s.checkAuth);
   const userRef = useRef(null);
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
@@ -46,6 +49,17 @@ export default function LoginView() {
       <div className="flex-1 md:w-1/2 flex items-center justify-center bg-[#101220] md:border-l md:border-white/5 px-6 py-10 md:px-12">
         <form onSubmit={handleSubmit} className="w-full max-w-sm" noValidate>
           <h1 className="text-3xl md:text-4xl font-extrabold text-on-surface mb-8">Login Here!</h1>
+
+          {notice && (
+            <div role="alert" className="mb-4 text-sm text-on-surface-variant border border-white/20 rounded-xl px-4 py-3">
+              <p>{notice}</p>
+              <button type="button" onClick={logout} className="underline mt-2 mr-4">Retry sign-out</button>
+              <button type="button" onClick={async () => {
+                const auth = await checkAuth();
+                if (!auth.required) await useStore.getState().init();
+              }} className="underline mt-2">Check connection</button>
+            </div>
+          )}
 
           {error && (
             <div role="alert" className="mb-4 text-sm text-error bg-error/10 border border-error/30 rounded-xl px-4 py-2">

@@ -39,24 +39,26 @@ function enqueue(name, task) {
   return next;
 }
 
-async function readRaw(name) {
+async function readRaw(name, { strict = false } = {}) {
   let raw;
   try {
     raw = await fs.readFile(fileFor(name), 'utf8');
   } catch (err) {
-    if (err.code === 'ENOENT') return [];
+    if (err.code === 'ENOENT') return strict ? null : [];
     throw err;
   }
   try {
     const data = JSON.parse(raw);
-    return Array.isArray(data) ? data : [];
-  } catch {
+    if (!Array.isArray(data)) throw new Error('Invalid collection shape');
+    return data;
+  } catch (err) {
+    if (strict) throw err;
     // Corrupt file (e.g. from an interrupted/raced write): quarantine it and
     // recover as empty so the store keeps working and self-heals on next write.
     try {
-      await fs.rename(fileFor(name), `${fileFor(name)}.corrupt-${Date.now()}`);
-    } catch {
-      /* best effort */
+      await fs.rename(fileFor(name), `${fileFor(name)}.corrupt-${Date.now()}-${randomUUID()}`);
+    } catch (cause) {
+      throw Object.assign(new Error('Collection recovery failed; original bytes preserved'), { code: 'STORE_RECOVERY_FAILED', cause });
     }
     console.error(`store: ${name}.json was corrupt — quarantined and reset.`);
     return [];
@@ -72,10 +74,14 @@ export const TMP_SUFFIX = '.tmp';
  * temp alongside it, then a rename. Unique because concurrent writers to the same
  * path must not share a temp (a previous shared "<file>.tmp" raced on rename).
  */
-export async function writeFileAtomic(filePath, data) {
+export async function writeFileAtomic(filePath, data, options) {
   const tmp = `${filePath}.${randomUUID()}${TMP_SUFFIX}`;
-  await fs.writeFile(tmp, data);
-  await fs.rename(tmp, filePath);
+  try {
+    await fs.writeFile(tmp, data, options);
+    await fs.rename(tmp, filePath);
+  } finally {
+    await fs.unlink(tmp).catch(() => {});
+  }
 }
 
 async function writeRaw(name, data) {
@@ -84,9 +90,9 @@ async function writeRaw(name, data) {
   return data;
 }
 
-export async function readCollection(name) {
+export async function readCollection(name, options) {
   await ensureDir();
-  return readRaw(name);
+  return readRaw(name, options);
 }
 
 // When a collection last changed on disk (ms), or 0 if it has never been written.
@@ -105,10 +111,10 @@ export function writeCollection(name, data) {
 
 // Atomic read-modify-write under the per-collection lock. `mutator(list)` may
 // mutate in place or return a new array; the result is persisted.
-export function updateCollection(name, mutator) {
+export function updateCollection(name, mutator, options) {
   return enqueue(name, async () => {
     await ensureDir();
-    const list = await readRaw(name);
+    const list = (await readRaw(name, options)) || [];
     const result = mutator(list) || list;
     await writeRaw(name, result);
     return result;
@@ -116,3 +122,30 @@ export function updateCollection(name, mutator) {
 }
 
 export { DATA_DIR, PLAYLIST_DIR };
+
+// Configuration restore changes one collection only. Its snapshot never leaves
+// the server; preserve exact old bytes (or absence) if committing fails.
+export function restoreStateCollection(build) {
+  return enqueue('state', async () => {
+    await ensureDir();
+    const file = fileFor('state');
+    let original = null;
+    try { original = await fs.readFile(file); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+    const records = original === null ? [] : JSON.parse(original.toString('utf8'));
+    if (!Array.isArray(records)) throw new Error('Invalid state collection');
+    const next = await build(records);
+    const snapshot = path.join(DATA_DIR, 'config-restore.previous.json');
+    await writeFileAtomic(snapshot, original ?? 'null', { mode: 0o600 });
+    try { await writeFileAtomic(file, JSON.stringify(next, null, 2)); }
+    catch (error) {
+      let current = null;
+      try { current = await fs.readFile(file); } catch (readError) { if (readError.code !== 'ENOENT') throw readError; }
+      if (!(current === null && original === null) && !(current && original && current.equals(original))) {
+        if (original === null) await fs.unlink(file);
+        else await fs.rename(snapshot, file);
+      }
+      throw error;
+    }
+    return next;
+  });
+}

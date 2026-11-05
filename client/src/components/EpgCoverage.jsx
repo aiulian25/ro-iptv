@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useStore } from '../store/useStore';
 import { api } from '../lib/api';
 import { countryFlag, countryName } from '../lib/country';
@@ -6,13 +6,14 @@ import Icon from './Icon';
 import EpgLinkButton from './EpgLinkButton';
 
 const TITLE = 'EPG coverage';
-const SUBTITLE = 'How much of your channel list the loaded guides actually resolve. Link anything that missed — your choice wins over automatic matching and follows you to your other devices.';
+const SUBTITLE = 'Guide links and schedule availability are counted separately. A link can exist without programmes in the loaded window (7 days back, 2 days ahead). Your manual choice stays in place even if its target disappears.';
 const NO_GUIDE = 'No guide data yet — add a source above.';
 const UNMATCHED_HEADING = 'Unmatched channels';
 const MANUAL_LINKS = 'Manual links';
 const UNLINK = 'Unlink';
 const UNDEFINED_COUNTRY = 'No country detected';
 const ALT_NAMES_PENDING = 'Alternative-name matching is still loading its dataset — coverage may improve shortly.';
+const EMPTY_OVERRIDES = Object.freeze({});
 
 // Colour the bar by how good the coverage is, using the existing role colours.
 function barTone(pct) {
@@ -24,30 +25,34 @@ function barTone(pct) {
 // Per-country coverage with the misses expandable into a to-do list. The counts
 // come from the server so they agree with what the guide will actually resolve.
 export default function EpgCoverage() {
-  const overrides = useStore((s) => s.settings.epgOverrides || {});
+  const storedOverrides = useStore((s) => s.settings.epgOverrides);
+  const overrides = storedOverrides || EMPTY_OVERRIDES;
+  // A synced/settings replacement can have a new object with identical links.
+  // Coverage depends on the effective map, not that object's reference/order.
+  const overridesKey = JSON.stringify(Object.keys(overrides).sort().map((id) => [id, overrides[id]]));
   const applySettings = useStore((s) => s.applySettings);
+  const sourceRevision = useStore((s) => s.epgSourceRevision);
+  const guideRevision = useStore((s) => s.epg?.guideRevision);
+  const saving = useStore((s) => s.settingsSaving);
   const channels = useStore((s) => s.channels);
   const [coverage, setCoverage] = useState(null);
   const [expanded, setExpanded] = useState('');
 
-  const load = useCallback(() => {
+  useEffect(() => {
+    let cancelled = false;
     api
       .epgCoverage()
-      .then(setCoverage)
-      .catch(() => setCoverage(null));
-  }, []);
-
-  useEffect(load, [load]);
-  // A link changes the answer, so re-ask once the change has been saved.
-  useEffect(() => {
-    if (coverage) load();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [overrides]);
+      .then((value) => { if (!cancelled) setCoverage(value); })
+      .catch(() => { if (!cancelled) setCoverage(null); });
+    // No automatic retry loop. A new map or mount starts one intended load;
+    // an older response cannot replace coverage for a newer map/unmounted view.
+    return () => { cancelled = true; };
+  }, [overridesKey, sourceRevision, guideRevision]);
 
   const unlink = (channelId) => {
     const next = { ...overrides };
     delete next[channelId];
-    applySettings({ epgOverrides: next });
+    void applySettings({ epgOverrides: next }).catch(() => {});
   };
 
   const linkedIds = Object.keys(overrides);
@@ -78,7 +83,11 @@ export default function EpgCoverage() {
                       {row.key ? countryName(row.key) : UNDEFINED_COUNTRY}
                     </p>
                     <p className="text-xs text-on-surface-variant">
-                      matched {row.matched.toLocaleString()} of {row.total.toLocaleString()} · {row.pct}%
+                      Guide links matched {row.matched.toLocaleString()} of {row.total.toLocaleString()} · {row.pct}%
+                    </p>
+                    <p className="text-xs text-on-surface-variant">
+                      {row.scheduled == null ? 'Schedule count unavailable' : `${row.scheduled.toLocaleString()} with programmes in loaded window`}
+                      {row.missingLinks > 0 && ` · ${row.missingLinks} missing manual target(s)`}
                     </p>
                     <div className="mt-1.5 h-1 w-full bg-surface-variant rounded-full overflow-hidden">
                       <div className={`h-full ${barTone(row.pct)}`} style={{ width: `${row.pct}%` }} />
@@ -98,7 +107,8 @@ export default function EpgCoverage() {
                           <span className="flex-1 min-w-0 text-sm truncate" title={channel.tvgId || channel.name}>
                             {channel.name}
                           </span>
-                          <EpgLinkButton channel={findChannel(channels, channel.id) || channel} />
+                          {channel.status === 'missing-target' && <span className="text-xs text-error">Manual target missing: {channel.targetKey}</span>}
+                          <EpgLinkButton channel={findChannel(channels, channel.id) || channel} label={channel.status === 'missing-target' ? 'Repair link' : 'Link EPG'} />
                         </div>
                       ))}
                     </div>
@@ -126,8 +136,12 @@ export default function EpgCoverage() {
                   {findChannel(channels, channelId)?.name || channelId}
                 </span>
                 <span className="text-xs font-mono text-on-surface-variant truncate">→ {overrides[channelId]}</span>
+                <span className="text-xs text-on-surface-variant">
+                  {linkStatus(coverage, channelId, overrides[channelId])}
+                </span>
+                <EpgLinkButton channel={findChannel(channels, channelId) || { id: channelId, name: channelId }} label="Repair link" />
                 <button
-                  onClick={() => unlink(channelId)}
+                  disabled={saving} onClick={() => unlink(channelId)}
                   className="text-on-surface-variant hover:text-error shrink-0 text-sm"
                 >
                   {UNLINK}
@@ -145,4 +159,11 @@ export default function EpgCoverage() {
 // elsewhere (it reads tvgId/name to seed its search).
 function findChannel(channels, channelId) {
   return channels.find((channel) => channel.id === channelId);
+}
+
+function linkStatus(coverage, channelId, target) {
+  const link = coverage?.links?.find((entry) => entry.channelId === channelId && entry.targetKey === target);
+  if (!link) return 'Coverage status unavailable';
+  if (link.status === 'missing-target') return 'Manual target missing — repair or unlink';
+  return link.hasProgrammes ? 'Linked · schedule available' : 'Linked · no programmes in loaded window';
 }

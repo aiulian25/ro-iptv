@@ -40,15 +40,17 @@ export default function TopNav() {
       </div>
 
       <div className="flex items-center gap-3 md:gap-5">
-        <div className="glass px-4 py-2 rounded-full flex items-center gap-2">
-          <Icon name="search" className="text-primary text-xl" />
-          <input
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            className="bg-transparent border-none outline-none text-sm md:text-base w-28 md:w-48 text-on-surface placeholder:text-on-surface-variant/60"
-            placeholder="Search channels..."
-          />
-        </div>
+        {(view === 'live' || view === 'radio') && (
+          <div className="glass px-4 py-2 rounded-full flex items-center gap-2">
+            <Icon name="search" className="text-primary text-xl" />
+            <input
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              className="bg-transparent border-none outline-none text-sm md:text-base w-28 md:w-48 text-on-surface placeholder:text-on-surface-variant/60"
+              placeholder="Search channels..."
+            />
+          </div>
+        )}
         <button
           onClick={() => setView('settings')}
           className={`transition-colors ${

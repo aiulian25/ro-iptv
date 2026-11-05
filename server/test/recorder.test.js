@@ -80,3 +80,20 @@ test('fileNameFor round-trips through resolveFile', () => {
 test('recordingsDir stays a subdirectory of the data volume', () => {
   assert.equal(RECORDINGS_DIR, path.join(DATA_DIR, 'recordings'));
 });
+
+// Check the actual writer, not just the download/delete path resolver.
+test('capture rejects invalid IDs before creating output directories or spawning', async () => {
+  const { promises: fs } = await import('node:fs');
+  const os = await import('node:os');
+  const { startCapture } = await import('../lib/recorder.js');
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'ro-iptv-writer-'));
+  try {
+    const dataDir = path.join(root, 'data');
+    for (const id of ['../outside', '/tmp/outside', 'a/b', 'a\\b', '', 42, null, {}, [], undefined]) {
+      assert.throws(() => startCapture({ rec: { id }, dataDir, maxMinutes: 1 }), /Invalid recording ID/);
+    }
+    assert.deepEqual(await fs.readdir(root), []);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});

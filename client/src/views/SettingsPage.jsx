@@ -1,11 +1,14 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { useStore, selectCountries, epgSources } from '../store/useStore';
+import { useMemo, useRef, useState } from 'react';
+import { useStore, selectCountries, settingsFormValues, hasSettingsDraft } from '../store/useStore';
 import { countryFlag, countryName } from '../lib/country';
 import { channelsToM3U, downloadText } from '../lib/exportM3U';
 import { api, playlistDownloadUrl } from '../lib/api';
 import Icon from '../components/Icon';
+import { sessionGeneration } from '../lib/privacy';
 import ConfirmButton from '../components/ConfirmButton';
 import PasswordSettings from '../components/PasswordSettings';
+import LocalStations from '../components/LocalStations';
+import BackupRestore from '../components/BackupRestore';
 import EpgSuggestions, { MatchSummary } from '../components/EpgSuggestions';
 import EpgCoverage from '../components/EpgCoverage';
 
@@ -36,16 +39,18 @@ const REFRESH_OPTIONS = [
 
 // Pre/post padding options (minutes) for EPG-scheduled recordings.
 const PADDING_OPTIONS = [0, 1, 2, 5, 10, 15];
-const DEFAULT_PADDING = { before: 1, after: 5 };
 const paddingLabel = (m) => (m === 0 ? 'Off' : `${m} min`);
 
-// Full-page Settings with a draft model: every *field* edit is staged locally and
+// Shared Settings fields use a draft model: edits are staged locally and
 // only committed when the single Save button is pressed. Playlist add/delete/refresh
 // remain immediate data actions (with their own buttons), not draftable fields.
+// The player shortcut is a separate immediate, session-only preference.
 export default function SettingsPage() {
   const playlists = useStore((s) => s.playlists);
   const settings = useStore((s) => s.settings);
   const loading = useStore((s) => s.loading);
+  const previousShortcut = useStore(s => s.previousChannelShortcut);
+  const setPreviousShortcut = useStore(s => s.setPreviousChannelShortcut);
   const channels = useStore((s) => s.channels);
 
   // Countries available across the loaded channels (for the default-country picker).
@@ -53,12 +58,24 @@ export default function SettingsPage() {
 
   const addPlaylistFromUrl = useStore((s) => s.addPlaylistFromUrl);
   const addPlaylistFromText = useStore((s) => s.addPlaylistFromText);
+  const pendingUploads = useStore((s) => s.pendingUploads);
+  const playlistChanges = useStore((s) => s.playlistChanges);
+  const identityConflicts = useStore((s) => s.identityConflicts);
+  const retryPlaylistChanges = useStore((s) => s.retryPlaylistChanges);
+  const discardPlaylistChange = useStore((s) => s.discardPlaylistChange);
+  const retryPlaylistUpload = useStore((s) => s.retryPlaylistUpload);
+  const discardPlaylistUpload = useStore((s) => s.discardPlaylistUpload);
   const removePlaylist = useStore((s) => s.removePlaylist);
   const refreshPlaylist = useStore((s) => s.refreshPlaylist);
   const setPlaylistEnabled = useStore((s) => s.setPlaylistEnabled);
   const setPlaylistKind = useStore((s) => s.setPlaylistKind);
   const clearChannelsOfKind = useStore((s) => s.clearChannelsOfKind);
   const applySettings = useStore((s) => s.applySettings);
+  const saving = useStore((s) => s.settingsSaving);
+  const settingsError = useStore((s) => s.settingsError);
+  const epgLoading = useStore((s) => s.epgLoading);
+  const epgError = useStore((s) => s.epgError);
+  const loadEpg = useStore((s) => s.loadEpg);
 
   const liveCount = useMemo(() => channels.filter((c) => c.kind === 'live').length, [channels]);
   const radioCount = useMemo(() => channels.filter((c) => c.kind === 'radio').length, [channels]);
@@ -66,17 +83,16 @@ export default function SettingsPage() {
   const setView = useStore((s) => s.setView);
 
   // ---- committed snapshot the draft is diffed against ----
-  const committed = {
-    epgUrls: epgSources(settings),
-    refreshIntervalMinutes: settings.refreshIntervalMinutes ?? 360,
-    defaultCountry: settings.defaultCountry || '',
-    recordingPadding: settings.recordingPadding || DEFAULT_PADDING,
-  };
-
-  const [draft, setDraft] = useState(committed);
-  const [addUrl, setAddUrl] = useState('');
-  const [addName, setAddName] = useState('');
-  const [epgInput, setEpgInput] = useState('');
+  const committed = settingsFormValues(settings);
+  const editor = useStore((s) => s.settingsDraft);
+  const updateDraft = useStore((s) => s.updateSettingsDraft);
+  const discardDraft = useStore((s) => s.discardSettingsDraft);
+  const draft = editor?.values || committed;
+  const addUrl = editor?.addUrl || '', addName = editor?.addName || '', epgInput = editor?.epgInput || '';
+  const setDraft = update => updateDraft(current => ({ ...current, values: typeof update === 'function' ? update(current.values || committed) : update }));
+  const setAddUrl = addUrl => updateDraft(current => ({ ...current, addUrl }));
+  const setAddName = addName => updateDraft(current => ({ ...current, addName }));
+  const setEpgInput = epgInput => updateDraft(current => ({ ...current, epgInput }));
   const [epgCheck, setEpgCheck] = useState(null);
   const [epgChecking, setEpgChecking] = useState(false);
   const fileRef = useRef(null);
@@ -116,25 +132,19 @@ export default function SettingsPage() {
     draft.defaultCountry !== committed.defaultCountry ||
     JSON.stringify(draft.recordingPadding) !== JSON.stringify(committed.recordingPadding);
 
-  // Warn on tab-close / refresh while there are unsaved field changes.
-  useEffect(() => {
-    if (!dirty) return;
-    const handler = (e) => {
-      e.preventDefault();
-      e.returnValue = '';
-    };
-    window.addEventListener('beforeunload', handler);
-    return () => window.removeEventListener('beforeunload', handler);
-  }, [dirty]);
-
-  const onSave = () => {
-    applySettings({
-      epgUrls: draft.epgUrls,
-      refreshIntervalMinutes: draft.refreshIntervalMinutes,
-      defaultCountry: draft.defaultCountry,
-      recordingPadding: draft.recordingPadding,
-    });
-    setToast('Settings saved');
+  const onSave = async () => {
+    const generation = sessionGeneration(), saved = useStore.getState().settingsDraft;
+    try {
+      await applySettings({
+        epgUrls: draft.epgUrls,
+        refreshIntervalMinutes: draft.refreshIntervalMinutes,
+        defaultCountry: draft.defaultCountry,
+        recordingPadding: draft.recordingPadding,
+      });
+      if (generation !== sessionGeneration()) return;
+      useStore.getState().acknowledgeSettingsDraft(saved);
+      setToast('Settings saved');
+    } catch { /* keep the draft and show the store error for retry */ }
   };
 
   // Download a playlist: the stored raw upload if present, else reconstruct from channels.
@@ -147,15 +157,16 @@ export default function SettingsPage() {
     downloadText(`${(p.name || 'playlist').replace(/[^a-zA-Z0-9-_ ]/g, '_')}.m3u`, channelsToM3U(chans));
   };
 
-  const onDiscard = () => setDraft(committed);
+  const onDiscard = () => discardDraft();
 
   // ---- immediate data actions ----
   const onAddUrl = async () => {
     if (!addUrl.trim()) return;
+    const generation = sessionGeneration();
     try {
       await addPlaylistFromUrl(addUrl.trim(), addName.trim() || undefined);
-      setAddUrl('');
-      setAddName('');
+      if (generation !== sessionGeneration()) return;
+      updateDraft(current => ({ ...current, addUrl: current.addUrl === addUrl ? '' : current.addUrl, addName: current.addName === addName ? '' : current.addName }));
     } catch {
       /* toast shown by store */
     }
@@ -164,9 +175,13 @@ export default function SettingsPage() {
   const onFile = async (e) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    const text = await file.text();
-    await addPlaylistFromText(text, file.name.replace(/\.[^.]+$/, ''));
-    e.target.value = '';
+    const input = e.target;
+    try {
+      const text = await file.text();
+      await addPlaylistFromText(text, file.name.replace(/\.[^.]+$/, ''));
+    } catch {
+      // The store retains the raw file and displays the retryable failure.
+    } finally { input.value = ''; }
   };
 
   return (
@@ -186,6 +201,10 @@ export default function SettingsPage() {
           </h1>
         </div>
 
+        {saving && <p role="status">Saving settings and refreshing guide…</p>}
+        {!saving && epgLoading && <p role="status">Refreshing guide…</p>}
+        {settingsError && <p role="alert" className="text-error">{settingsError}</p>}
+        {epgError && <div role="alert" className="text-error">{epgError} <button disabled={epgLoading || saving} onClick={() => loadEpg()} className="underline">Retry guide</button></div>}
         {/* Playlists (immediate actions) */}
         <section className="glass rounded-2xl p-5 md:p-6">
           <h2 className="text-lg font-semibold text-primary mb-1">Playlists</h2>
@@ -222,6 +241,7 @@ export default function SettingsPage() {
             </div>
             <button
               onClick={() => fileRef.current?.click()}
+              disabled={loading}
               className="glass rounded-xl px-4 py-3 flex items-center justify-center gap-2 hover:bg-white/10"
             >
               <Icon name="upload_file" /> Upload .m3u / .m3u8 file
@@ -235,11 +255,40 @@ export default function SettingsPage() {
             />
           </div>
 
-          {playlists.length === 0 ? (
+          {pendingUploads.map((upload) => (
+            <div key={upload.id} className="glass rounded-xl p-3" role="status">
+              <p className="font-medium">{upload.name}</p>
+              <p className="text-sm text-on-surface-variant">{upload.status === 'saving' ? 'Saving file and playlist on server…' : upload.error || 'Upload pending.'}</p>
+              {upload.status !== 'saving' && <div className="flex gap-4 mt-2">
+                {upload.status !== 'conflict' && <button type="button" onClick={() => retryPlaylistUpload(upload.id).catch(() => {})} className="underline">Retry upload</button>}
+                {upload.status === 'conflict' && <button type="button" onClick={() => downloadText('recovered-upload.m3u', upload.text)} className="underline">Download pending copy</button>}
+                <button type="button" onClick={() => discardPlaylistUpload(upload.id)} className="underline">Discard pending upload</button>
+              </div>}
+            </div>
+          ))}
+
+          <button type="button" onClick={() => retryPlaylistChanges().catch(() => setToast('Playlist sync failed'))} className="underline self-start">Sync playlists</button>
+          {Object.values(identityConflicts).some((items) => items.length) && <div role="status" className="glass rounded-xl p-3 text-sm">
+            Some channel identities could not be matched safely. Variants remain separate, and unmatched favourites or guide links are kept for review. Choose the intended channel and relink it explicitly.
+          </div>}
+          {playlistChanges.map((change) => (
+            <div key={change.id} role="status" className="glass rounded-xl p-3">
+              <p className="font-medium break-words">{change.record.name || 'Playlist'} — {change.type === 'delete' ? 'pending deletion' : 'pending change'}</p>
+              <p className="text-sm text-on-surface-variant">{change.status === 'saving' ? 'Syncing…' : change.error || 'Pending sync'}</p>
+              {change.volatile && <p className="text-sm text-on-surface-variant">Browser storage is unavailable. Keep this tab open until the change is synced or recovered.</p>}
+              {change.status !== 'saving' && <div className="flex gap-4 mt-2">
+                {change.record.channels?.length > 0 && <button type="button" onClick={() => downloadText('recovered-playlist.m3u', channelsToM3U(change.record.channels))} className="underline">Download local copy</button>}
+                {change.status !== 'conflict' && <button type="button" onClick={() => retryPlaylistChanges().catch(() => {})} className="underline">Retry sync</button>}
+                <button type="button" onClick={() => discardPlaylistChange(change.id).catch(() => {})} className="underline">Discard pending change</button>
+              </div>}
+            </div>
+          ))}
+
+          {playlists.filter(p => p.managed !== 'radio-stations').length === 0 ? (
             <p className="text-sm text-on-surface-variant">No playlists yet — add one above.</p>
           ) : (
             <div className="flex flex-col gap-2">
-              {playlists.map((p) => {
+              {playlists.filter(p => p.managed !== 'radio-stations').map((p) => {
                 const enabled = p.enabled !== false;
                 return (
                   <div key={p.id} className="glass rounded-xl p-3 flex flex-col gap-2">
@@ -247,6 +296,7 @@ export default function SettingsPage() {
                       {/* Enable toggle — included in the combined channel set */}
                       <button
                         onClick={() => setPlaylistEnabled(p.id, !enabled)}
+                        disabled={playlistChanges.some((change) => change.id === p.id)}
                         role="switch"
                         aria-checked={enabled}
                         aria-label={`${enabled ? 'Disable' : 'Enable'} ${p.name}`}
@@ -261,16 +311,17 @@ export default function SettingsPage() {
                         <p className="text-xs text-on-surface-variant truncate">
                           {p.channelCount} channels • {p.type} • updated {timeAgo(p.updatedAt)}
                         </p>
+                        {(p.pending || p.syncError) && <p className="text-xs text-on-surface-variant">{p.pending ? 'Pending sync' : p.syncError}</p>}
                       </div>
                       <button onClick={() => onDownload(p)} title="Download playlist" className="text-on-surface-variant hover:text-primary">
                         <Icon name="download" />
                       </button>
                       {p.url && (
-                        <button onClick={() => refreshPlaylist(p.id)} title="Refresh now" className="text-on-surface-variant hover:text-primary">
+                        <button disabled={playlistChanges.some((change) => change.id === p.id)} onClick={() => refreshPlaylist(p.id)} title="Refresh now" className="text-on-surface-variant hover:text-primary">
                           <Icon name="sync" />
                         </button>
                       )}
-                      <button onClick={() => removePlaylist(p.id)} title="Delete playlist" className="text-on-surface-variant hover:text-error">
+                      <button disabled={playlistChanges.some((change) => change.id === p.id)} onClick={() => removePlaylist(p.id)} title="Delete playlist" className="text-on-surface-variant hover:text-error">
                         <Icon name="delete" />
                       </button>
                     </div>
@@ -445,6 +496,18 @@ export default function SettingsPage() {
           </div>
         </section>
 
+        <section className="glass rounded-2xl p-5 md:p-6">
+          <h2 className="text-lg font-semibold text-primary mb-1">Player shortcut</h2>
+          <label className="block text-sm" htmlFor="previous-channel-shortcut">Previous channel shortcut</label>
+          <select id="previous-channel-shortcut" value={previousShortcut} onChange={event => setPreviousShortcut(event.target.value)} className="glass rounded-xl px-4 py-3 mt-2">
+            <option value="b">B</option><option value="p">P</option><option value="">Off</option>
+          </select>
+          <p className="text-sm text-on-surface-variant mt-2">Applies immediately for this session. Focus the player to use it; typing and other controls keep their normal keys.</p>
+        </section>
+
+        <LocalStations />
+        <BackupRestore />
+
         {/* Account — voluntary password change (only when auth is enabled) */}
         <PasswordSettings />
 
@@ -480,22 +543,23 @@ export default function SettingsPage() {
       {/* Sticky single-Save action bar */}
       <div
         className={`fixed bottom-0 inset-x-0 z-30 transition-transform duration-300 ${
-          dirty ? 'translate-y-0' : 'translate-y-full'
+          hasSettingsDraft(editor, settings) ? 'translate-y-0' : 'translate-y-full'
         }`}
       >
         <div className="glass-dark border-t border-white/10 px-4 md:px-8 py-3 flex items-center justify-between gap-4 max-w-3xl mx-auto rounded-t-2xl">
           <span className="text-sm text-on-surface-variant flex items-center gap-2">
-            <Icon name="edit" className="text-base text-primary" /> You have unsaved changes
+            <Icon aria-hidden="true" name="edit" className="text-base text-primary" /> {dirty ? 'You have unsaved changes' : 'Unsubmitted form text kept'}
           </span>
           <div className="flex items-center gap-2">
-            <button onClick={onDiscard} className="px-4 py-2 rounded-full text-sm hover:bg-white/10 transition-colors">
+            <button disabled={saving} onClick={onDiscard} className="px-4 py-2 rounded-full text-sm hover:bg-white/10 transition-colors">
               Discard
             </button>
             <button
+              disabled={saving || !dirty}
               onClick={onSave}
               className="bg-primary text-on-primary px-6 py-2 rounded-full text-sm font-semibold hover:scale-105 transition-transform shadow-lg shadow-primary/20"
             >
-              Save
+              {saving ? 'Saving…' : 'Save'}
             </button>
           </div>
         </div>

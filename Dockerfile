@@ -4,10 +4,10 @@
 # Stage 1 — build the React/Vite frontend
 # ----------------------------------------------------------------------------
 # Pinned to the *build* platform, not the target: this stage emits static
-# JS/CSS, so its output is identical for every architecture. Without the pin,
-# a multi-arch build re-runs the whole npm install + vite build under QEMU for
-# each extra arch, which cost ~45min of emulation for a byte-identical `dist`.
-FROM --platform=$BUILDPLATFORM node:20-alpine AS client-build
+# JS/CSS, identical for every architecture. Inert while only linux/amd64 is
+# published, and what makes adding an arch back cheap — without it each extra
+# arch re-runs npm install + vite build under QEMU, ~45min for the same `dist`.
+FROM --platform=$BUILDPLATFORM node:24-alpine@sha256:8a32c8cf649a49915a66e81e7a609223c708d0adabf288ee3f4077d765542f85 AS client-build
 WORKDIR /app/client
 COPY client/package*.json ./
 RUN npm ci
@@ -20,11 +20,11 @@ RUN npm run build
 # ----------------------------------------------------------------------------
 # Stage 2 — install backend production deps
 # ----------------------------------------------------------------------------
-# Also build-platform pinned. Safe only because every runtime dependency is
-# pure JavaScript (no compiled .node addons), so the installed tree is
-# architecture-independent. Adding a dep with a native binding means dropping
-# this pin.
-FROM --platform=$BUILDPLATFORM node:20-alpine AS server-deps
+# Also build-platform pinned, on the same reasoning. Valid only while every
+# runtime dependency is pure JavaScript (no compiled .node addons), so the
+# installed tree is architecture-independent — a dep with a native binding means
+# dropping this pin before publishing any arch but the build host's.
+FROM --platform=$BUILDPLATFORM node:24-alpine@sha256:8a32c8cf649a49915a66e81e7a609223c708d0adabf288ee3f4077d765542f85 AS server-deps
 WORKDIR /app/server
 COPY server/package*.json ./
 RUN npm ci --omit=dev
@@ -32,7 +32,7 @@ RUN npm ci --omit=dev
 # ----------------------------------------------------------------------------
 # Stage 3 — final runtime image (single container: Express serves API + SPA)
 # ----------------------------------------------------------------------------
-FROM node:20-alpine AS runtime
+FROM node:24-alpine@sha256:8a32c8cf649a49915a66e81e7a609223c708d0adabf288ee3f4077d765542f85 AS runtime
 ENV NODE_ENV=production \
     PORT=56892 \
     DATA_DIR=/data \
@@ -60,7 +60,9 @@ COPY --from=client-build /app/client/dist ./public
 RUN mkdir -p /data && \
     addgroup -g 1001 app && adduser -D -u 1001 -G app app && \
     chown -R app:app /app /data
-USER app
+# Numeric, so the uid resolves without this image's passwd file — a name needs
+# a lookup the host or a user-namespaced runtime may not be able to perform.
+USER 1001:1001
 
 # OCI image labels — `source` lets GitHub link this package to its repository
 # automatically. Placed late so it doesn't bust the build cache above.
@@ -73,7 +75,9 @@ LABEL org.opencontainers.image.title="RO-IPTV" \
 VOLUME ["/data"]
 EXPOSE 56892
 
+# Exec form, so no shell is spawned every 30s. busybox wget already exits 1 on a
+# non-200 or a refused connection, which is exactly what `|| exit 1` was doing.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s \
-  CMD wget -qO- http://127.0.0.1:56892/api/health || exit 1
+  CMD ["wget", "-qO-", "http://127.0.0.1:56892/api/health"]
 
 CMD ["node", "index.js"]

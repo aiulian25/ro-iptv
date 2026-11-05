@@ -1,3 +1,5 @@
+import { reconcilePlaylistChannels } from './channel-identity.js';
+import { safeDiagnostic, sourceId } from './redact.js';
 // Server-side index of the channels the user actually has.
 //
 // The combined channel set has always lived in the browser (localStorage, built
@@ -52,7 +54,7 @@ let dirtyTimer = null;
 
 // Raw channels of one playlist: re-fetched for URL playlists, re-read from the
 // stored upload for file playlists. Throws so the caller can skip just this one.
-async function readPlaylistChannels(playlist) {
+async function readPlaylistRawChannels(playlist) {
   if (playlist.url) {
     if (!isValidUrl(playlist.url)) throw new Error('invalid playlist url');
     if (isBlockedTarget(playlist.url)) throw new Error('refusing a private-network playlist url');
@@ -69,6 +71,10 @@ async function readPlaylistChannels(playlist) {
   return parseM3U(await fs.readFile(filePath, 'utf8'));
 }
 
+export async function readPlaylistChannels(playlist) {
+  return reconcilePlaylistChannels(playlist.id, await readPlaylistRawChannels(playlist));
+}
+
 /**
  * Build the wanted-channels index from the enabled playlists. Pure: it neither
  * caches nor persists — callers publish the result (see buildAndPublish).
@@ -79,7 +85,9 @@ async function readPlaylistChannels(playlist) {
  */
 export async function buildWantedChannels() {
   const updatedAt = new Date().toISOString();
-  const playlists = (await readCollection(PLAYLIST_COLLECTION)).filter((p) => p.enabled !== false);
+  // Corrupt/unreadable metadata is not evidence of an intentionally empty
+  // scope. Missing metadata still represents a fresh install.
+  const playlists = ((await readCollection(PLAYLIST_COLLECTION, { strict: true })) || []).filter((p) => p.enabled !== false);
   const channels = [];
   const skippedPlaylists = [];
   let truncated = false;
@@ -91,10 +99,10 @@ export async function buildWantedChannels() {
     }
     let parsed;
     try {
-      parsed = await readPlaylistChannels(playlist);
+      parsed = (await readPlaylistChannels(playlist)).channels;
     } catch (err) {
       skippedPlaylists.push(playlist.id);
-      console.warn(`epg-channels: skipped playlist ${playlist.id}:`, String(err));
+      console.warn(`epg-channels: skipped playlist ${sourceId(playlist.id)}:`, safeDiagnostic(err));
       continue;
     }
     for (const channel of parsed) {
@@ -118,6 +126,7 @@ export async function buildWantedChannels() {
 
   const countries = [...new Set(channels.map((c) => c.country).filter(Boolean))].sort();
   return {
+    identityVersion: 3,
     updatedAt,
     countries,
     channels,
@@ -135,7 +144,7 @@ function indexTtl(index) {
 
 // Usable = within its TTL and built after the last playlist change.
 async function isUsable(index, builtAt) {
-  if (!index || !(builtAt > 0)) return false;
+  if (!index || index.identityVersion !== 3 || !(builtAt > 0)) return false;
   if (Date.now() - builtAt >= indexTtl(index)) return false;
   return (await collectionChangedAt(PLAYLIST_COLLECTION)) < builtAt;
 }
@@ -195,7 +204,7 @@ export async function getWantedChannels({ refresh = false } = {}) {
 export function markWantedChannelsDirty() {
   clearTimeout(dirtyTimer);
   dirtyTimer = setTimeout(() => {
-    refreshWantedChannels().catch((err) => console.warn('epg-channels: rebuild failed:', String(err)));
+    refreshWantedChannels().catch((err) => console.warn('epg-channels: rebuild failed:', safeDiagnostic(err)));
   }, DIRTY_DEBOUNCE_MS);
   dirtyTimer.unref?.();
 }

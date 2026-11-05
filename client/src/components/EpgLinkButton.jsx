@@ -7,10 +7,11 @@ const MAX_ROWS = 50;
 
 // Manually map a channel to an xmltv guide channel when automatic matching fails.
 // The choice persists in settings.epgOverrides and wins over all auto-matching.
-export default function EpgLinkButton({ channel }) {
+export default function EpgLinkButton({ channel, label = 'Link EPG' }) {
   const epg = useStore((s) => s.epg);
   const overrides = useStore((s) => s.settings.epgOverrides || {});
   const applySettings = useStore((s) => s.applySettings);
+  const saving = useStore((s) => s.settingsSaving);
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
 
@@ -24,15 +25,15 @@ export default function EpgLinkButton({ channel }) {
 
   const currentOverride = overrides[channel.id];
 
-  const link = (xmltvId) => {
-    applySettings({ epgOverrides: { ...overrides, [channel.id]: xmltvId } });
-    setOpen(false);
+  const link = async (xmltvId) => {
+    try { await applySettings({ epgOverrides: { ...overrides, [channel.id]: xmltvId } }); setOpen(false); }
+    catch { /* store shows the retryable save error; keep the picker open */ }
   };
-  const unlink = () => {
+  const unlink = async () => {
     const next = { ...overrides };
     delete next[channel.id];
-    applySettings({ epgOverrides: next });
-    setOpen(false);
+    try { await applySettings({ epgOverrides: next }); setOpen(false); }
+    catch { /* store shows the retryable save error */ }
   };
 
   return (
@@ -44,7 +45,7 @@ export default function EpgLinkButton({ channel }) {
         className="glass px-5 py-2.5 rounded-full flex items-center gap-2 hover:bg-white/10 transition-all"
       >
         <Icon name="link" className="text-lg" />
-        <span className="font-mono text-xs">Link EPG</span>
+        <span className="font-mono text-xs">{saving ? 'Saving…' : label}</span>
       </button>
       {open && (
         <div className="absolute z-40 mt-2 right-0 glass-dark rounded-xl p-2 w-72 max-w-[80vw]">
@@ -58,7 +59,7 @@ export default function EpgLinkButton({ channel }) {
           />
           <div className="max-h-64 overflow-y-auto scroll-area flex flex-col">
             {currentOverride && (
-              <button onClick={unlink} className="text-left px-3 py-1.5 rounded text-sm text-error hover:bg-white/10">
+              <button disabled={saving} onClick={unlink} className="text-left px-3 py-1.5 rounded text-sm text-error hover:bg-white/10">
                 Unlink
               </button>
             )}
@@ -66,7 +67,7 @@ export default function EpgLinkButton({ channel }) {
               matches.map(({ id, name }) => (
                 <button
                   key={id}
-                  onClick={() => link(id)}
+                  disabled={saving} onClick={() => link(id)}
                   className={`text-left px-3 py-1.5 rounded text-sm hover:bg-white/10 truncate ${currentOverride === id ? 'text-primary' : ''}`}
                 >
                   {name || id} <span className="text-on-surface-variant/60">({id})</span>

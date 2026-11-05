@@ -1,3 +1,4 @@
+import { useGuideTime } from '../hooks/useGuideTime';
 import { useMemo, useState } from 'react';
 import { useStore, selectFilteredChannels } from '../store/useStore';
 import ChannelList from '../components/ChannelList';
@@ -8,13 +9,14 @@ import CountryGrid from '../components/CountryGrid';
 import MobilePanelBar from '../components/MobilePanelBar';
 import EpgGuide from '../components/EpgGuide';
 import EpgTimeline from '../components/EpgTimeline';
+import ProgrammeSearch from '../components/ProgrammeSearch';
 import EpgLinkButton from '../components/EpgLinkButton';
 import ProgrammeModal from '../components/ProgrammeModal';
-import VideoPlayer from '../components/VideoPlayer';
 import Icon from '../components/Icon';
+import PlaybackSlot from '../components/PlaybackSlot';
 import FavouriteButton from '../components/FavouriteButton';
 import { countryFlag, countryName } from '../lib/country';
-import { programmesForChannel, findNowNext, fmtTime, progressPct } from '../lib/epg';
+import { programmesForChannel, findNowNext, fmtTime, progressPct, canScheduleProgramme } from '../lib/epg';
 import { supportsCatchup } from '../lib/catchup';
 
 const PANEL_TITLES = {
@@ -48,7 +50,8 @@ export default function LiveView() {
   // re-filtered the entire channel list — on every unrelated write (a toast, a history
   // push, the recordings poll).
   const sidebarPanel = useStore((s) => s.sidebarPanel);
-  const currentChannel = useStore((s) => s.currentChannel);
+  const activeChannel = useStore((s) => s.currentChannel);
+  const currentChannel = activeChannel?.kind === 'radio' ? null : activeChannel;
   const channels = useStore((s) => s.channels);
   const epg = useStore((s) => s.epg);
   const history = useStore((s) => s.history);
@@ -63,7 +66,6 @@ export default function LiveView() {
   const playChannel = useStore((s) => s.playChannel);
   const startRecording = useStore((s) => s.startRecording);
   const stopRecording = useStore((s) => s.stopRecording);
-  const stopPlayback = useStore((s) => s.stopPlayback);
   const setSelectedCountry = useStore((s) => s.setSelectedCountry);
   const setCategory = useStore((s) => s.setCategory);
   const setSidebarPanel = useStore((s) => s.setSidebarPanel);
@@ -104,16 +106,17 @@ export default function LiveView() {
 
   // History panel maps stored entries back to channel-like objects.
   const historyChannels = useMemo(
-    () => history.map((h) => ({ ...h, group: h.group || 'History' })),
+    () => history.filter((h) => h.kind !== 'radio').map((h) => ({ ...h, group: h.group || 'History' })),
     [history]
   );
 
+  const at = new Date(useGuideTime());
   const epgOverrides = settings.epgOverrides || {};
   const progs = currentChannel ? programmesForChannel(epg, currentChannel, epgOverrides) : [];
-  const { now, next } = findNowNext(progs);
+  const { now, next } = findNowNext(progs, at);
 
   // Record-duration menu options: "Until programme ends" (when EPG now exists) + fixed durations.
-  const untilEnds = now ? Math.max(1, Math.ceil((new Date(now.stop) - Date.now()) / MS_PER_MINUTE)) : 0;
+  const untilEnds = now ? Math.max(1, Math.ceil((new Date(now.stop) - at.getTime()) / MS_PER_MINUTE)) : 0;
   const recordOptions = now
     ? [['Until programme ends', untilEnds], ...RECORD_DURATION_OPTIONS]
     : RECORD_DURATION_OPTIONS;
@@ -128,15 +131,16 @@ export default function LiveView() {
 
   // The guide can be read as cards or as a time grid; the choice is a setting so
   // it follows the user between devices like every other preference.
+  const guideSearchChannels = useMemo(() => channels.filter(channel => channel.kind === 'live'), [channels]);
   const isTimeline = sidebarPanel === 'epg' && settings.epgView === EPG_VIEW_GRID;
 
   let leftContent;
   if (sidebarPanel === 'epg') {
-    leftContent = isTimeline ? (
+    leftContent = <ProgrammeSearch channels={guideSearchChannels} onSelect={playChannel}>{isTimeline ? (
       <EpgTimeline channels={liveChannels} onSelect={playChannel} />
     ) : (
       <EpgGuide channels={liveChannels} onSelect={playChannel} />
-    );
+    )}</ProgrammeSearch>;
   } else if (sidebarPanel === 'history') {
     leftContent = <ChannelList channels={historyChannels} onSelect={playChannel} />;
   } else if (sidebarPanel === 'categories') {
@@ -196,7 +200,7 @@ export default function LiveView() {
               <div className="flex items-center gap-3">
                 <span className="text-3xl leading-none">{countryFlag(selectedCountry)}</span>
                 <div>
-                  <h2 className="text-2xl font-semibold text-primary leading-tight">{countryName(selectedCountry)}</h2>
+                  <h2 className="text-2xl font-semibold text-primary leading-tight">{selectedCountry === '*' ? 'All channels' : countryName(selectedCountry)}</h2>
                   <p className="text-on-surface-variant text-sm">Live Now • {listCount} Channels</p>
                 </div>
               </div>
@@ -214,7 +218,7 @@ export default function LiveView() {
                   {EPG_VIEWS.map(([view, label]) => (
                     <button
                       key={view}
-                      onClick={() => applySettings({ epgView: view })}
+                      onClick={() => applySettings({ epgView: view }).catch(() => {})}
                       aria-pressed={(settings.epgView || EPG_VIEW_LIST) === view}
                       className={`px-3 py-1 rounded-full text-sm transition-colors ${
                         (settings.epgView || EPG_VIEW_LIST) === view
@@ -246,12 +250,7 @@ export default function LiveView() {
           {/* Video — pinned at the top on mobile while the list scrolls under it */}
           <div className="order-1 lg:order-none sticky top-24 z-30 lg:static w-full aspect-video">
             {currentChannel ? (
-              <VideoPlayer
-                channel={currentChannel}
-                onPrev={() => playRelative(-1)}
-                onNext={() => playRelative(1)}
-                onStop={stopPlayback}
-              />
+              <PlaybackSlot kind="live" onPrev={() => playRelative(-1)} onNext={() => playRelative(1)} />
             ) : (
               <div className="w-full h-full rounded-3xl glass flex flex-col items-center justify-center text-on-surface-variant gap-3">
                 <Icon name="smart_display" className="text-6xl text-primary/60" />
@@ -301,8 +300,19 @@ export default function LiveView() {
                               <button
                                 key={label}
                                 onClick={() => {
-                                  startRecording(currentChannel, now, mins);
+                                  const state = useStore.getState(), channel = state.currentChannel;
+                                  const clickedAt = new Date();
+                                  const programme = channel && findNowNext(programmesForChannel(state.epg, channel, state.settings.epgOverrides || {}), clickedAt).now;
                                   setShowRecordMenu(false);
+                                  if (!channel || channel.kind === 'radio') return;
+                                  if (label === 'Until programme ends') {
+                                    if (!canScheduleProgramme(programme)) {
+                                      state.setToast('Current programme end is unavailable. Choose a fixed recording duration.');
+                                      return;
+                                    }
+                                    const remaining = Math.max(1, Math.ceil((Date.parse(programme.stop) - clickedAt.getTime()) / MS_PER_MINUTE));
+                                    startRecording(channel, programme, remaining);
+                                  } else startRecording(channel, programme, mins);
                                 }}
                                 className="block w-full text-left px-3 py-1.5 rounded text-sm hover:bg-white/10"
                               >
@@ -350,7 +360,7 @@ export default function LiveView() {
                   <div className="w-full h-2 bg-surface-variant/50 rounded-full overflow-hidden">
                     <div
                       className="h-full bg-primary shadow-[0_0_15px_rgba(192,193,255,0.6)]"
-                      style={{ width: `${progressPct(now)}%` }}
+                      style={{ width: `${progressPct(now, at)}%` }}
                     />
                   </div>
                 </div>

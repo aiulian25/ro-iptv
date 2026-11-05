@@ -1,0 +1,24 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { promises as fs } from 'node:fs';
+import path from 'node:path';
+import zlib from 'node:zlib';
+import { createHash } from 'node:crypto';
+import { epgFixture } from './helpers/epg-commit-fixture.js';
+const stamp = ms => new Date(ms).toISOString().replace(/[-:T]/g, '').slice(0, 14);
+test('legacy stored timestamps are refetched and normalized unknown ends survive both guide endpoints', { timeout: 20000 }, async t => {
+  const now = Date.now(), start = stamp(now - 600000), next = stamp(now + 600000);
+  const f = await epgFixture({ prefix: 'ro-iptv-aud017-fixture-', logDir: process.env.AUD017_LOG_DIR, xml: () => `<tv><channel id="c"><display-name>Fixture</display-name></channel><programme channel="c" start="${start}"><title>Inferred</title></programme><programme channel="c" start="${next}"><title>Unknown end</title></programme></tv>` }); t.after(f.cleanup);
+  const url = f.origin + '/time.xml';
+  await f.save({ epgUrls: [url] });
+  const file = path.join(f.root, 'epg', 'guide-' + createHash('sha256').update(url).digest('hex').slice(0, 16) + '.json.gz');
+  await fs.mkdir(path.dirname(file), { recursive: true });
+  await fs.writeFile(file, zlib.gzipSync(JSON.stringify({ url, fetchedAt: new Date().toISOString(), guide: { channels: { c: { name: 'Wrong legacy' } }, programmes: { c: [{ title: 'Wrong legacy time', start: '2026-07-01T11:00Z', stop: null }] } } })));
+  const merged = await (await fetch(f.base + '/api/epg/merged')).json();
+  assert.equal(f.hits['/time.xml'], 1); assert.equal(merged.programmes.c.length, 2);
+  assert.equal(merged.programmes.c[0].stop, merged.programmes.c[1].start);
+  assert.equal(merged.programmes.c[0].endStatus, 'inferred'); assert.equal(merged.programmes.c[1].stop, null); assert.equal(merged.programmes.c[1].endStatus, 'unknown');
+  const stored = JSON.parse(zlib.gunzipSync(await fs.readFile(file))); assert.equal(stored.schemaVersion, 2);
+  const legacyEndpoint = await (await fetch(f.base + '/api/epg?url=' + encodeURIComponent(url) + '&hours=48')).json();
+  assert.equal(legacyEndpoint.programmes.c[1].endStatus, 'unknown');
+});

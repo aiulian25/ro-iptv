@@ -32,6 +32,7 @@ await new Promise((resolve) => origin.listen(0, '127.0.0.1', resolve));
 const ORIGIN = `http://127.0.0.1:${origin.address().port}`;
 
 process.env.PROXY_BLOCK_PRIVATE = '1';
+process.env.EPG_SIDECAR_ENABLED = '1';
 process.env.EPG_SIDECAR_URL = `${ORIGIN}/redirect-to-private`;
 const { guardedFetch, isBlockedTarget } = await import('../lib/http.js');
 

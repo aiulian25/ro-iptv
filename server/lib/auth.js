@@ -1,7 +1,7 @@
 // Single-user authentication for RO-IPTV.
 //
 // Credential model (bootstrap → stored):
-//   • On a fresh install the env AUTH_USERNAME/AUTH_PASSWORD (default admin/admin)
+//   • On a fresh install the env AUTH_USERNAME/AUTH_PASSWORD (Compose defaults admin/admin)
 //     act as a ONE-TIME bootstrap credential.
 //   • The first login with the bootstrap credential forces a password change.
 //   • Setting a new password stores a salted scrypt hash in the /data volume.
@@ -25,12 +25,14 @@ const MIN_PASSWORD = 8;
 export const COOKIE = 'ro_session';
 export const REMEMBER_DAYS = SESSION_DAYS;
 
+let authState = 'uninitialized'; // disabled | bootstrap | established | error
 let secret = null;
+let revokedSessions = new Map();
 let storedCred = null; // { username, salt, hash, updatedAt } once a password is set
 
-// Auth is on when a bootstrap password is configured OR a stored credential exists.
+// Fail closed until initialization succeeds, and after any initialization error.
 export function isAuthEnabled() {
-  return ENV_ENABLED || !!storedCred;
+  return authState !== 'disabled';
 }
 
 // The effective username (stored credential wins over env).
@@ -47,25 +49,46 @@ function credentialVersion() {
 
 // True while still on the bootstrap credential (no stored password yet).
 export function needsPasswordChange() {
-  return isAuthEnabled() && !storedCred;
+  return authState === 'bootstrap';
 }
 
 // Load the signing secret + any stored credential. Called once at boot.
 export async function initAuth() {
-  const coll = await readCollection('auth');
-  const rec = coll[0] || {};
-  if (process.env.AUTH_SESSION_SECRET) {
-    secret = process.env.AUTH_SESSION_SECRET;
-  } else if (rec.secret) {
-    secret = rec.secret;
-  } else {
-    secret = crypto.randomBytes(32).toString('hex');
-    await updateCollection('auth', (list) => {
-      list[0] = { ...(list[0] || {}), secret };
-      return list;
-    });
+  authState = 'error';
+  secret = null;
+  storedCred = null;
+  revokedSessions = new Map();
+  // Strict reads preserve invalid bytes and propagate I/O errors. Only ENOENT
+  // denotes a fresh installation; an existing empty/malformed record is invalid.
+  const coll = await readCollection('auth', { strict: true });
+  const rec = coll === null ? {} : coll[0];
+  if (coll !== null) {
+    if (coll.length !== 1 || !rec || typeof rec !== 'object' || Array.isArray(rec) ||
+        (Object.hasOwn(rec, 'secret') ? typeof rec.secret !== 'string' || !rec.secret.length :
+          !process.env.AUTH_SESSION_SECRET || !Object.hasOwn(rec, 'credential'))) {
+      throw new Error('Invalid authentication state');
+    }
+    if (Object.hasOwn(rec, 'credential')) {
+      const c = rec.credential;
+      if (!c || typeof c !== 'object' || typeof c.username !== 'string' || !c.username.length ||
+          typeof c.salt !== 'string' || !/^[a-f0-9]{32}$/i.test(c.salt) ||
+          typeof c.hash !== 'string' || !/^[a-f0-9]{128}$/i.test(c.hash) ||
+          typeof c.updatedAt !== 'string' || !Number.isFinite(Date.parse(c.updatedAt))) {
+        throw new Error('Invalid authentication credential');
+      }
+    }
   }
-  if (rec.credential && rec.credential.hash) storedCred = rec.credential;
+  if (rec.revokedSessions !== undefined) {
+    if (!Array.isArray(rec.revokedSessions) || rec.revokedSessions.some(item => !item || !/^[a-f0-9]{64}$/.test(item.hash) || !Number.isFinite(item.exp))) throw new Error('Invalid session revocations');
+    revokedSessions = new Map(rec.revokedSessions.filter(item => item.exp > Date.now()).map(item => [item.hash, item.exp]));
+  }
+  const nextSecret = process.env.AUTH_SESSION_SECRET || rec.secret || crypto.randomBytes(32).toString('hex');
+  if (coll === null) {
+    await updateCollection('auth', () => [{ secret: nextSecret }], { strict: true });
+  }
+  secret = nextSecret;
+  storedCred = rec.credential || null;
+  authState = storedCred ? 'established' : ENV_ENABLED ? 'bootstrap' : 'disabled';
 }
 
 const b64url = (buf) => Buffer.from(buf).toString('base64url');
@@ -82,7 +105,7 @@ export function signToken(payload) {
   return `${body}.${b64url(hmac(body))}`;
 }
 
-export function verifyToken(token) {
+export function verifyToken(token, allowRevoked = false) {
   if (!secret || !token || typeof token !== 'string') return null;
   const dot = token.lastIndexOf('.');
   if (dot < 0) return null;
@@ -104,19 +127,21 @@ export function verifyToken(token) {
   if (!payload || typeof payload.exp !== 'number' || payload.exp < Date.now()) return null;
   // Minted against a password that has since been replaced (or a pre-cv token).
   if (payload.cv !== credentialVersion()) return null;
+  if (!allowRevoked && revokedSessions.has(sha(token).toString('hex'))) return null;
   return payload;
 }
 
 // Mint a signed token. `mustChange` flags a bootstrap session. Returns { token }.
 export function issueToken(days, mustChange) {
   const exp = Date.now() + days * 24 * 60 * 60 * 1000;
-  return { token: signToken({ u: currentUsername(), exp, mc: mustChange ? 1 : 0, cv: credentialVersion() }) };
+  return { token: signToken({ u: currentUsername(), exp, mc: mustChange ? 1 : 0, cv: credentialVersion(), sid: crypto.randomBytes(16).toString('hex') }) };
 }
 
 // ---- credential verification --------------------------------------------
 // Constant-time. Verifies against the stored credential if present, else the
 // env bootstrap credential (which is thereby invalidated once a password is set).
 export function verifyCredentials(username, password) {
+  if (authState !== 'bootstrap' && authState !== 'established') return false;
   if (storedCred) {
     const okUser = crypto.timingSafeEqual(sha(username || ''), sha(storedCred.username));
     const key = scryptHash(password || '', Buffer.from(storedCred.salt, 'hex'));
@@ -132,6 +157,7 @@ export function verifyCredentials(username, password) {
 // Validate + persist a new password (salted scrypt hash) to /data. After this,
 // the env bootstrap credential no longer authenticates.
 export async function setPassword(newPassword) {
+  if (authState === 'error' || authState === 'uninitialized') throw new Error('Authentication unavailable');
   const pw = String(newPassword || '');
   if (pw.length < MIN_PASSWORD) {
     return { ok: false, error: `Password must be at least ${MIN_PASSWORD} characters.` };
@@ -149,8 +175,9 @@ export async function setPassword(newPassword) {
   await updateCollection('auth', (list) => {
     list[0] = { ...(list[0] || {}), credential };
     return list;
-  });
+  }, { strict: true });
   storedCred = credential;
+  authState = 'established';
   return { ok: true };
 }
 
@@ -162,7 +189,7 @@ export function parseCookies(header) {
     const i = part.indexOf('=');
     if (i < 0) continue;
     const k = part.slice(0, i).trim();
-    if (k) out[k] = decodeURIComponent(part.slice(i + 1).trim());
+    if (k) { try { out[k] = decodeURIComponent(part.slice(i + 1).trim()); } catch { /* malformed cookie is not a session */ } }
   }
   return out;
 }
@@ -170,4 +197,18 @@ export function parseCookies(header) {
 export function userFromRequest(req) {
   const token = parseCookies(req.headers.cookie)[COOKIE];
   return verifyToken(token);
+}
+
+// Persist only a digest, never the bearer token. Retry is possible if a previous
+// revocation was rejected by storage; expiry pruning never revives live sessions.
+export async function revokeRequestSession(req) {
+  const token = parseCookies(req.headers.cookie)[COOKIE], payload = verifyToken(token, true);
+  if (!payload) return;
+  const hash = sha(token).toString('hex');
+  revokedSessions.set(hash, payload.exp);
+  await updateCollection('auth', list => {
+    const entries = (list[0].revokedSessions || []).filter(item => item.exp > Date.now() && item.hash !== hash);
+    list[0] = { ...list[0], revokedSessions: [...entries, { hash, exp: payload.exp }] };
+    return list;
+  }, { strict: true });
 }

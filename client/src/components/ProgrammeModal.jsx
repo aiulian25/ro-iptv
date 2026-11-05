@@ -1,23 +1,20 @@
 import Icon from './Icon';
+import Dialog from './Dialog';
 import { proxied } from '../lib/api';
-import { fmtTime } from '../lib/epg';
+import { fmtProgrammeTime, canScheduleProgramme } from '../lib/epg';
 
 // Details overlay for a single EPG programme (same overlay pattern as the
 // recordings playback modal). Renders nothing when no programme is selected.
-export default function ProgrammeModal({ programme, onClose }) {
+export default function ProgrammeModal({ programme, channel, onPlay, onRecord, onClose }) {
   if (!programme) return null;
   const p = programme;
   const image = p.icon && /^https?:\/\//i.test(p.icon) ? proxied(p.icon) : p.icon;
-  const timeRange = p.start ? `${fmtTime(p.start)} – ${fmtTime(p.stop)}` : '';
+  const timeRange = p.start ? fmtProgrammeTime(p) : '';
 
   return (
-    <div
-      className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4"
-      onClick={onClose}
-    >
+    <Dialog label={p.title} onClose={onClose}>
       <div
         className="glass-dark rounded-3xl w-full max-w-lg max-h-[85vh] overflow-y-auto scroll-area"
-        onClick={(e) => e.stopPropagation()}
       >
         {image && (
           <img
@@ -38,11 +35,20 @@ export default function ProgrammeModal({ programme, onClose }) {
               className="text-on-surface-variant hover:text-on-surface shrink-0"
               aria-label="Close"
             >
-              <Icon name="close" className="text-3xl" />
+              <Icon aria-hidden="true" name="close" className="text-3xl" />
             </button>
           </div>
 
+          {channel && <p className="font-semibold">{channel.name} · {new Date(p.start).toLocaleDateString()}</p>}
+          {channel && !onPlay && <p role="status">This channel is no longer available.</p>}
+          {channel && <div className="flex flex-wrap gap-3">
+            <button type="button" disabled={!onPlay} onClick={onPlay} className="glass rounded-xl px-4 min-h-11 disabled:opacity-50">Play channel</button>
+            <button type="button" disabled={!onRecord} onClick={onRecord} className="glass rounded-xl px-4 min-h-11 disabled:opacity-50">Schedule recording</button>
+          </div>}
           {timeRange && <p className="font-mono text-sm text-primary">{timeRange}</p>}
+
+          {channel && canScheduleProgramme(p) && Date.parse(p.stop) <= Date.now() && <p className="text-sm text-on-surface-variant">This airing has ended; Play channel tunes the current live stream.</p>}
+          {!canScheduleProgramme(p) && <p className="text-sm text-on-surface-variant">Recording unavailable until precise start and end times are known.</p>}
 
           {(p.episode || p.date || p.rating) && (
             <div className="flex flex-wrap gap-2 text-xs">
@@ -56,6 +62,6 @@ export default function ProgrammeModal({ programme, onClose }) {
           {p.category && <p className="text-sm text-on-surface-variant/70">{p.category}</p>}
         </div>
       </div>
-    </div>
+    </Dialog>
   );
 }

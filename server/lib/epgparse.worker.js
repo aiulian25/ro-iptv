@@ -21,6 +21,7 @@ function isGzip(buffer) {
 async function run() {
   const { body, maxOutputLength } = workerData;
   const buffer = Buffer.from(body);
+  if (buffer.length > maxOutputLength) throw new Error('XMLTV input too large');
   const xml = isGzip(buffer) ? (await gunzip(buffer, { maxOutputLength })).toString('utf8') : buffer.toString('utf8');
   parentPort.postMessage(parseEPG(xml));
 }

@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import Icon from './Icon';
+import MiniPlayer from './MiniPlayer';
+import PreviousChannelButton from './PreviousChannelButton';
 import { attachStream } from '../lib/playSource';
 import ChannelLogo from './ChannelLogo';
 import FavouriteButton from './FavouriteButton';
@@ -14,13 +16,16 @@ const BAR_COUNT = 14;
 const NOW_PLAYING_POLL_MS = 20_000;
 
 // Right-hand "Now Playing" radio panel: vinyl animation + Web Audio visualizer.
-export default function RadioPlayer({ station, onPrev, onNext, onStop }) {
+export default function RadioPlayer({ station, compact = false, preferences, onPrev, onNext, onStop, onExpand }) {
   const audioRef = useRef(null);
   const hlsRef = useRef(null);
   const rafRef = useRef(null);
   const barsRef = useRef([]);
   const [playing, setPlaying] = useState(false);
-  const [volume, setVolume] = useState(0.9);
+  const localPreferences = useRef({ volume: 0.9, muted: false });
+  const prefs = preferences || localPreferences;
+  const [volume, setVolume] = useState(prefs.current.volume);
+  const [muted, setMuted] = useState(prefs.current.muted);
   const [error, setError] = useState(null);
   const [nowPlaying, setNowPlaying] = useState(null);
   const epg = useStore((s) => s.epg);
@@ -76,28 +81,27 @@ export default function RadioPlayer({ station, onPrev, onNext, onStop }) {
     const audio = audioRef.current;
     if (!audio || !station) return;
     setError(null);
-    audio.volume = volume;
-    const isHls = /\.m3u8(\?|$)/i.test(station.url || '');
+    audio.volume = prefs.current.volume; audio.muted = prefs.current.muted;
     const stop = attachStream(audio, station, {
       hlsRef,
-      isHls,
       onManifest: () => audio.play().catch(() => {}),
-      onError: () => setError('Stream unavailable'),
+      onError: (data) => setError(data.unsupportedCodec ? 'Unsupported format or codec — try another source' : 'Stream unavailable — try another source'),
     });
 
     return () => {
-      stop();
+      stop(); audio.pause();
       audio.removeAttribute('src');
       audio.load?.();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [station]);
+  }, [station?.id, station?.url, station?.httpUserAgent, station?.httpReferrer, station?.mimeType, station?.contentType, station?.streamType]);
 
   // Synthetic visualizer. We deliberately DON'T route the audio through the Web
   // Audio API: a MediaElementSource graph gets suspended when the screen locks /
   // app backgrounds on mobile, which kills background playback. Playing the audio
   // element directly lets it keep going in the background (with Media Session).
   useEffect(() => {
+    if (compact) return;
     const tick = () => {
       const bars = barsRef.current;
       if (bars.length) {
@@ -109,18 +113,21 @@ export default function RadioPlayer({ station, onPrev, onNext, onStop }) {
     };
     rafRef.current = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(rafRef.current);
-  }, [playing]);
+  }, [playing, compact]);
 
   const togglePlay = () => {
     const a = audioRef.current;
     if (!a) return;
-    if (a.paused) a.play();
+    if (a.paused) a.play().catch(() => {});
     else a.pause();
   };
+
+  const toggleMute = () => { if (audioRef.current) audioRef.current.muted = !audioRef.current.muted; };
 
   const onVolume = (e) => {
     const v = parseFloat(e.target.value);
     setVolume(v);
+    prefs.current.volume = v;
     if (audioRef.current) audioRef.current.volume = v;
   };
 
@@ -134,8 +141,10 @@ export default function RadioPlayer({ station, onPrev, onNext, onStop }) {
   }
 
   return (
-    <div className="glass rounded-[40px] p-6 md:p-8 flex flex-col items-center justify-between h-full relative overflow-hidden">
-      <audio ref={audioRef} onPlay={() => setPlaying(true)} onPause={() => setPlaying(false)} preload="auto" />
+    <div data-channel-player tabIndex={0} role="region" aria-label="Radio player" className={compact ? 'w-full' : 'glass rounded-[40px] p-6 md:p-8 flex flex-col items-center justify-between h-full relative overflow-hidden'}>
+      <audio ref={audioRef} onPlay={() => setPlaying(true)} onPause={() => setPlaying(false)} preload="auto"
+        onVolumeChange={(event) => { const a = event.currentTarget; prefs.current = { volume: a.volume, muted: a.muted }; setVolume(a.volume); setMuted(a.muted); }} />
+      {compact ? <MiniPlayer channel={station} playing={playing} muted={muted} onToggleMute={toggleMute} onPrev={onPrev} onNext={onNext} onStop={onStop} onTogglePlay={togglePlay} onExpand={onExpand} /> : <>
       <div className="absolute -top-20 -right-20 w-64 h-64 bg-primary/20 blur-[100px] rounded-full" />
       <div className="absolute -bottom-20 -left-20 w-64 h-64 bg-secondary/20 blur-[100px] rounded-full" />
 
@@ -143,7 +152,7 @@ export default function RadioPlayer({ station, onPrev, onNext, onStop }) {
         <div className="flex items-center justify-center gap-2 mb-3">
           <span className={`w-2 h-2 rounded-full ${playing ? 'bg-red-500 animate-pulse' : 'bg-on-surface-variant'}`} />
           <span className="font-mono text-xs uppercase text-on-surface-variant">
-            {error ? 'Offline' : playing ? 'Live Broadcast' : 'Paused'}
+            {error || (playing ? 'Live Broadcast' : 'Paused')}
           </span>
         </div>
         <h2 className="text-2xl font-semibold text-on-surface truncate px-4">{station.name}</h2>
@@ -196,27 +205,31 @@ export default function RadioPlayer({ station, onPrev, onNext, onStop }) {
       </div>
 
       {/* Controls */}
-      <div className="flex items-center justify-between w-full px-5 py-3 bg-white/5 rounded-3xl border border-white/5 z-10">
+      <div className="flex flex-wrap gap-2 items-center justify-center sm:justify-between w-full px-2 sm:px-5 py-3 bg-white/5 rounded-3xl border border-white/5 z-10">
+        <button aria-label="Stop" onClick={onStop} className="p-2 hover:text-error"><Icon name="stop_circle" /></button>
+        <PreviousChannelButton />
         <FavouriteButton channelId={station.id} size="text-2xl" className="p-2" />
         <div className="flex items-center gap-4 md:gap-6">
-          <button onClick={onPrev} className="p-2 text-on-surface-variant hover:text-white">
+          <button aria-label="Previous" onClick={onPrev} className="p-2 text-on-surface-variant hover:text-white">
             <Icon name="skip_previous" className="text-2xl" />
           </button>
           <button
+            aria-label={playing ? 'Pause' : 'Play'}
             onClick={togglePlay}
             className="w-14 h-14 bg-primary text-on-primary rounded-full flex items-center justify-center shadow-lg hover:scale-110 transition-transform"
           >
             <Icon name={playing ? 'pause' : 'play_arrow'} fill className="text-3xl" />
           </button>
-          <button onClick={onNext} className="p-2 text-on-surface-variant hover:text-white">
+          <button aria-label="Next" onClick={onNext} className="p-2 text-on-surface-variant hover:text-white">
             <Icon name="skip_next" className="text-2xl" />
           </button>
         </div>
         <div className="flex items-center gap-1">
-          <Icon name="volume_up" className="text-xl text-on-surface-variant" />
-          <input type="range" min="0" max="1" step="0.05" value={volume} onChange={onVolume} className="w-14 accent-primary" />
+          <button aria-label={muted ? 'Unmute' : 'Mute'} onClick={toggleMute}><Icon name={muted ? 'volume_off' : 'volume_up'} className="text-xl text-on-surface-variant" /></button>
+          <input aria-label="Volume" type="range" min="0" max="1" step="0.05" value={volume} onChange={onVolume} className="w-14 accent-primary" />
         </div>
       </div>
+      </>}
     </div>
   );
 }

@@ -7,6 +7,7 @@ import Icon from './Icon';
 // desktop gets prev/next arrows + edge fades that appear only when overflowing.
 export default function CategoryChips({ kind }) {
   const channels = useStore((s) => s.channels);
+  const favourites = useStore((s) => s.favourites);
   const active = useStore((s) => s.activeCategory);
   const setCategory = useStore((s) => s.setCategory);
   const selectedCountry = useStore((s) => s.selectedCountry);
@@ -15,11 +16,12 @@ export default function CategoryChips({ kind }) {
   // Base list categories are computed from (kind + current country scope).
   const cats = useMemo(() => {
     let base = channels.filter((c) => !kind || c.kind === kind);
+    if (kind === 'radio' && sidebarPanel === 'favourites') base = base.filter(c => favourites.includes(c.id));
     if (isCountryScoped({ selectedCountry, sidebarPanel }, kind)) {
       base = base.filter((c) => channelCountry(c) === selectedCountry);
     }
     return selectCategoriesFor(base);
-  }, [channels, kind, selectedCountry, sidebarPanel]);
+  }, [channels, kind, selectedCountry, sidebarPanel, favourites]);
 
   const scrollerRef = useRef(null);
   const [atStart, setAtStart] = useState(true);

@@ -5,7 +5,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 process.env.PROXY_BLOCK_PRIVATE = '1';
-const { isValidUrl, isPrivateHost, isBlockedTarget } = await import('../lib/http.js');
+const { isValidUrl, isPrivateHost, isBlockedTarget } = await import(process.env.AUD005_HTTP_MODULE || '../lib/http.js');
 
 test('isValidUrl accepts only http(s)', () => {
   assert.equal(isValidUrl('http://example.com/a.m3u'), true);
@@ -38,10 +38,14 @@ test('isPrivateHost covers loopback, RFC1918, CGNAT, link-local and internal nam
     '::ffff:7f00:1',
     '::ffff:a00:1',
     '::ffff:c0a8:101',
+    'fe90::1',
+    '::',
+    '224.0.0.1',
+    '64:ff9b::7f00:1',
   ]) {
     assert.equal(isPrivateHost(host), true, `${host} must be private`);
   }
-  for (const host of ['example.com', '8.8.8.8', '172.32.0.1', '192.169.0.1', '100.128.0.1', '::ffff:8.8.8.8', '::ffff:808:808']) {
+  for (const host of ['example.com', 'fchannel.example', 'fdomain.example', 'fe80-radio.example', '8.8.8.8', '172.32.0.1', '192.169.0.1', '100.128.0.1', '::ffff:8.8.8.8', '::ffff:808:808']) {
     assert.equal(isPrivateHost(host), false, `${host} must be public`);
   }
 });

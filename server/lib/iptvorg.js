@@ -1,3 +1,4 @@
+import { safeDiagnostic } from './redact.js';
 // The iptv-org public dataset, reduced to what the sidecar mapping needs.
 //
 // iptv-org publishes the two things required to turn "the channels this install
@@ -220,7 +221,7 @@ export function warmIptvOrgDataset(countries) {
   warming = loadIptvOrgIndex(countries)
     .then(() => true)
     .catch((err) => {
-      console.warn('iptv-org: dataset warm failed:', String(err.message || err));
+      console.warn('iptv-org: dataset warm failed:', safeDiagnostic(err));
       return false;
     })
     .finally(() => {

@@ -1,6 +1,7 @@
+import { useGuideTime } from '../hooks/useGuideTime';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useStore } from '../store/useStore';
-import { programmesForChannel, fmtTime, isProgrammeScheduled } from '../lib/epg';
+import { programmesForChannel, fmtTime, isProgrammeScheduled, programmeInWindow, canScheduleProgramme, fmtProgrammeTime } from '../lib/epg';
 import { supportsCatchup } from '../lib/catchup';
 import ChannelLogo from './ChannelLogo';
 import ProgrammeModal from './ProgrammeModal';
@@ -17,13 +18,11 @@ const TICK_MINUTES = 30;
 // A block narrower than this cannot show anything readable, so short programmes
 // get a floor rather than collapsing to a sliver.
 const MIN_BLOCK_PX = 48;
+// A fixed-width start marker, not a guessed programme duration.
+const UNKNOWN_BLOCK_PX = 160;
 const CHANNEL_COLUMN_PX = 168;
 const ROW_HEIGHT_PX = 56;
 const PAGE = 20;
-// One shared tick drives the now-line and the "on now" highlight. Deliberately
-// not useClock's one second: at this scale a second is 0.05px of movement, so
-// ticking that fast would re-render every row for nothing.
-const TICK_MS = 30_000;
 const DEFAULT_PADDING = { before: 1, after: 5 };
 const SCROLL_LEAD_HOURS = 1;
 
@@ -41,7 +40,7 @@ export default function EpgTimeline({ channels, onSelect }) {
   const scrollRef = useRef(null);
   const [limit, setLimit] = useState(PAGE);
   const [selected, setSelected] = useState(null);
-  const [now, setNow] = useState(() => Date.now());
+  const now = useGuideTime();
 
   // Pinned on mount: a moving origin would slide every block sideways under the
   // user. The now-line moves within this fixed axis instead.
@@ -49,11 +48,6 @@ export default function EpgTimeline({ channels, onSelect }) {
   const axisEnd = axisStart + (HOURS_PAST + HOURS_FUTURE) * MS_PER_HOUR;
   const axisWidth = (HOURS_PAST + HOURS_FUTURE) * PX_PER_HOUR;
   const offsetOf = (ms) => ((ms - axisStart) / MS_PER_HOUR) * PX_PER_HOUR;
-
-  useEffect(() => {
-    const id = setInterval(() => setNow(Date.now()), TICK_MS);
-    return () => clearInterval(id);
-  }, []);
 
   // Open on the current hour rather than a day of history.
   useEffect(() => {
@@ -177,14 +171,14 @@ function ChannelRow({
   const blocks = useMemo(() => {
     const programmes = programmesForChannel(epg, channel, overrides);
     return programmes
-      .filter((programme) => Date.parse(programme.stop) > axisStart && Date.parse(programme.start) < axisEnd)
+      .filter((programme) => programmeInWindow(programme, axisStart, axisEnd))
       .map((programme) => {
         const start = Date.parse(programme.start);
         const stop = Date.parse(programme.stop);
         return {
           programme,
           left: offsetOf(start),
-          width: Math.max(MIN_BLOCK_PX, ((stop - start) / MS_PER_HOUR) * PX_PER_HOUR),
+          width: Number.isFinite(stop) ? Math.max(MIN_BLOCK_PX, ((stop - start) / MS_PER_HOUR) * PX_PER_HOUR) : UNKNOWN_BLOCK_PX,
           start,
           stop,
         };
@@ -199,6 +193,7 @@ function ChannelRow({
       {/* Opaque, not glass: programme blocks scroll underneath this column, and a
           translucent background lets their text ghost through it. */}
       <button
+        aria-label={`Play ${channel.name}`}
         onClick={() => onSelect(channel)}
         className="sticky left-0 z-20 bg-surface-container shrink-0 flex items-center gap-2 px-2 text-left border-r border-white/10 hover:bg-surface-container-high transition-colors"
         style={{ width: CHANNEL_COLUMN_PX, height: ROW_HEIGHT_PX }}
@@ -209,22 +204,24 @@ function ChannelRow({
 
       <div className="relative" style={{ width: axisWidth, height: ROW_HEIGHT_PX }}>
         {blocks.map(({ programme, left, width, start, stop }) => {
-          const isNow = start <= now && now < stop;
+          const isNow = !programme.timeUncertain && start <= now && now < stop;
           const isPast = stop <= now;
           const isScheduled = isProgrammeScheduled(recordings, channel.name, programme);
           return (
             <div
               key={`${start}-${programme.title}`}
-              onClick={() => onOpen(programme)}
+              title={fmtProgrammeTime(programme)}
               className={`absolute top-1 bottom-1 rounded-md px-2 py-1 border cursor-pointer overflow-hidden transition-colors group ${
                 isNow ? 'border-primary bg-primary/10' : 'border-white/10 bg-white/5 hover:border-white/30'
-              } ${isPast ? 'opacity-60' : ''}`}
+              } ${!Number.isFinite(stop) ? 'border-dashed' : ''} ${isPast ? 'opacity-60' : ''}`}
               style={{ left, width }}
             >
-              <p className="text-xs font-medium truncate">{programme.title}</p>
-              <p className="font-mono text-[10px] text-on-surface-variant truncate">
-                {fmtTime(programme.start)}–{fmtTime(programme.stop)}
-              </p>
+              <button type="button" onClick={() => onOpen(programme)} aria-label={`Details: ${programme.title} on ${channel.name}`} className="absolute inset-0 w-full h-full px-2 py-1 pr-7 text-left rounded-md">
+                <span className="block text-xs font-medium truncate">{programme.title}</span>
+                <span className="block font-mono text-[10px] text-on-surface-variant truncate">
+                  {fmtProgrammeTime(programme)}
+                </span>
+              </button>
 
               <div className="absolute top-0.5 right-0.5 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity">
                 {isPast ? (
@@ -238,13 +235,14 @@ function ChannelRow({
                       aria-label={`Play ${programme.title} from the archive`}
                       className="text-primary hover:text-white"
                     >
-                      <Icon name="replay" className="text-sm" />
+                      <Icon aria-hidden="true" name="replay" className="text-sm" />
                     </button>
                   )
                 ) : (
                   <button
                     onClick={(event) => {
                       event.stopPropagation();
+                      if (!canScheduleProgramme(programme)) return;
                       onSchedule({
                         channelId: channel.id,
                         channelName: channel.name,
@@ -257,11 +255,12 @@ function ChannelRow({
                         end: new Date(stop + padding.after * MS_PER_MINUTE).toISOString(),
                       });
                     }}
-                    title={`Schedule ${programme.title}`}
+                    disabled={!canScheduleProgramme(programme)}
+                    title={canScheduleProgramme(programme) ? `Schedule ${programme.title}` : 'Recording unavailable: end time unknown or time imprecise'}
                     aria-label={`Schedule ${programme.title}`}
                     className={isScheduled ? 'text-error' : 'text-on-surface-variant hover:text-error'}
                   >
-                    <Icon name="fiber_manual_record" className="text-sm" />
+                    <Icon aria-hidden="true" name="fiber_manual_record" className="text-sm" />
                   </button>
                 )}
               </div>

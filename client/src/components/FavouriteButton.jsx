@@ -5,7 +5,7 @@ import { useStore } from '../store/useStore';
 // shows a filled RED star; otherwise an outline star. Works on any page because
 // it keys off the global favourites set by channel id. Stops propagation so it
 // can sit inside clickable channel/station cards without triggering them.
-export default function FavouriteButton({ channelId, variant = 'icon', size = 'text-xl', className = '' }) {
+export default function FavouriteButton({ channelId, channelName, variant = 'icon', size = 'text-xl', className = '' }) {
   const isFav = useStore((s) => s.favourites.includes(channelId));
   const toggleFavourite = useStore((s) => s.toggleFavourite);
 
@@ -14,7 +14,7 @@ export default function FavouriteButton({ channelId, variant = 'icon', size = 't
     toggleFavourite(channelId);
   };
 
-  const label = isFav ? 'Remove from favourites' : 'Add to favourites';
+  const label = `${isFav ? 'Remove from favourites' : 'Add to favourites'}${channelName ? `: ${channelName}` : ''}`;
 
   if (variant === 'pill') {
     return (
@@ -25,7 +25,7 @@ export default function FavouriteButton({ channelId, variant = 'icon', size = 't
         aria-label={label}
         className={`glass px-5 py-2.5 rounded-full flex items-center gap-2 hover:bg-white/10 transition-all ${className}`}
       >
-        <Icon name="star" fill={isFav} className={isFav ? 'text-red-500' : 'text-on-surface-variant'} />
+        <Icon aria-hidden="true" name="star" fill={isFav} className={isFav ? 'text-red-500' : 'text-on-surface-variant'} />
         <span className="font-mono text-xs">{isFav ? 'Favourited' : 'Favourite'}</span>
       </button>
     );
@@ -40,7 +40,7 @@ export default function FavouriteButton({ channelId, variant = 'icon', size = 't
       title={label}
       className={`shrink-0 transition-colors ${isFav ? 'text-red-500' : 'text-on-surface-variant/50 hover:text-red-400'} ${className}`}
     >
-      <Icon name="star" fill={isFav} className={size} />
+      <Icon aria-hidden="true" name="star" fill={isFav} className={size} />
     </button>
   );
 }

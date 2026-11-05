@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useStore } from '../store/useStore';
 import Icon from '../components/Icon';
+import Dialog from '../components/Dialog';
 import ChannelLogo from '../components/ChannelLogo';
 import { api, recordingFileUrl, recordingDownloadUrl } from '../lib/api';
 
@@ -35,27 +36,16 @@ export default function RecordingsView() {
   const recordings = useStore((s) => s.recordings);
   const removeRecording = useStore((s) => s.removeRecording);
   const stopRecording = useStore((s) => s.stopRecording);
-  const loadRecordings = useStore((s) => s.loadRecordings);
   const [watching, setWatching] = useState(null);
   const [storage, setStorage] = useState(null);
 
-  const hasActive = recordings.some((r) => r.status === 'recording');
-
-  const loadStorage = () => api.storage().then(setStorage).catch(() => {});
-
-  // Refresh on mount, then poll only while a capture is in progress (live size).
+  // The app-level updater owns recording status; refresh the storage meter
+  // when that shared snapshot changes, without another polling loop here.
   useEffect(() => {
-    loadRecordings();
-    loadStorage();
-  }, [loadRecordings]);
-  useEffect(() => {
-    if (!hasActive) return;
-    const id = setInterval(() => {
-      loadRecordings();
-      loadStorage();
-    }, 4000);
-    return () => clearInterval(id);
-  }, [hasActive, loadRecordings]);
+    let active = true;
+    api.storage().then(value => { if (active) setStorage(value); }).catch(() => {});
+    return () => { active = false; };
+  }, [recordings]);
 
   const sorted = [...recordings].sort((a, b) => new Date(b.start) - new Date(a.start));
 
@@ -68,7 +58,7 @@ export default function RecordingsView() {
     : [];
 
   return (
-    <div className="md:ml-20 pt-24 md:pt-28 px-4 md:px-8 pb-8 min-h-screen">
+    <div className="pt-24 md:pt-28 px-4 md:px-8 pb-8 min-h-screen">
       <div className="mb-6">
         <h1 className="text-2xl md:text-3xl font-semibold">Recordings</h1>
         <p className="text-on-surface-variant">{recordings.length} recordings</p>
@@ -86,11 +76,12 @@ export default function RecordingsView() {
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
           {sorted.map((rec) => {
-            const st = STATUS[rec.status] || STATUS.completed;
+            const st = STATUS[rec.status] || { label: 'Unknown', color: 'text-on-surface-variant' };
             const isRecording = rec.status === 'recording';
-            // Only finished captures have a complete, playable file.
+            // Failed/interrupted output remains recoverable, never guaranteed playable.
             const hasFile =
-              !!rec.filename && rec.size > 0 && (rec.status === 'completed' || rec.status === 'interrupted');
+              !!rec.filename && rec.size > 0 && ['completed', 'interrupted', 'failed'].includes(rec.status);
+            const isPartial = hasFile && (rec.partial || rec.status !== 'completed');
             return (
               <div key={rec.id} className="glass rounded-2xl p-4 flex gap-4">
                 <ChannelLogo src={rec.channelLogo} kind="live" className="w-16 h-16" rounded="rounded-xl" />
@@ -98,7 +89,7 @@ export default function RecordingsView() {
                   <div className="flex items-center gap-2">
                     <span className={`font-mono text-[11px] uppercase flex items-center gap-1.5 ${st.color}`}>
                       <span className={`w-2 h-2 rounded-full bg-current ${st.pulse ? 'animate-pulse' : ''}`} />
-                      {st.label}
+                      {st.label}{isPartial ? ' · partial' : ''}
                     </span>
                     {/* File size — the headline of this feature */}
                     <span className="font-mono text-[11px] text-on-surface-variant ml-auto">
@@ -107,6 +98,7 @@ export default function RecordingsView() {
                   </div>
                   <h3 className="font-semibold truncate mt-0.5">{rec.title}</h3>
                   <p className="text-on-surface-variant text-sm truncate">{rec.channelName}</p>
+                  {rec.status === 'scheduled' && rec.channelIdentityIssue && <p className="text-xs text-error">Channel unavailable or ambiguous — review this schedule.</p>}
                   <p className="font-mono text-xs text-on-surface-variant mt-1">
                     {fmt(rec.start)} → {fmt(rec.end)}
                   </p>
@@ -117,34 +109,35 @@ export default function RecordingsView() {
                         onClick={() => stopRecording(rec.id)}
                         className="text-sm text-red-400 hover:text-red-300 flex items-center gap-1"
                       >
-                        <Icon name="stop_circle" fill className="text-lg" /> Stop
+                        <Icon aria-hidden="true" name="stop_circle" fill className="text-lg" /> Stop
                       </button>
                     )}
                     {hasFile && (
                       <>
                         <button
-                          onClick={() => setWatching(rec)}
+                          onClick={() => setWatching({ ...rec, partial: isPartial })}
                           className="text-sm text-primary hover:underline flex items-center gap-1"
                         >
-                          <Icon name="play_arrow" className="text-lg" /> Watch
+                          <Icon aria-hidden="true" name="play_arrow" className="text-lg" /> {isPartial ? 'Try partial' : 'Watch'}
                         </button>
                         <a
                           href={recordingDownloadUrl(rec.id)}
                           download
                           className="text-sm text-primary hover:underline flex items-center gap-1"
                         >
-                          <Icon name="download" className="text-lg" /> Download
+                          <Icon aria-hidden="true" name="download" className="text-lg" /> {isPartial ? 'Download partial' : 'Download'}
                         </a>
                       </>
                     )}
+                    {isPartial && <span className="text-xs text-secondary">Partial file — playback may fail.</span>}
                     {rec.status === 'failed' && (
-                      <span className="text-xs text-error truncate" title={rec.error}>Capture failed</span>
+                      <span className="text-xs text-error truncate" title={Number.isInteger(rec.exitCode) ? `Capture failed (exit code ${rec.exitCode})` : 'Capture failed'}>Capture failed</span>
                     )}
                     <button
                       onClick={() => removeRecording(rec.id)}
                       className="text-sm text-on-surface-variant hover:text-error flex items-center gap-1"
                     >
-                      <Icon name="delete" className="text-lg" /> Remove
+                      <Icon aria-hidden="true" name="delete" className="text-lg" /> Remove
                     </button>
                   </div>
                 </div>
@@ -156,17 +149,15 @@ export default function RecordingsView() {
 
       {/* Playback modal — plays the captured file (seekable, native controls) */}
       {watching && (
-        <div
-          className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4"
-          onClick={() => setWatching(null)}
-        >
-          <div className="w-full max-w-5xl" onClick={(e) => e.stopPropagation()}>
+        <Dialog label={watching.title} onClose={() => setWatching(null)} maxWidth="64rem">
+          <div className="w-full max-w-5xl">
             <div className="flex items-center justify-between mb-3">
               <h2 className="text-xl font-semibold truncate">{watching.title}</h2>
               <button onClick={() => setWatching(null)} className="text-on-surface-variant hover:text-on-surface" aria-label="Close">
-                <Icon name="close" className="text-3xl" />
+                <Icon aria-hidden="true" name="close" className="text-3xl" />
               </button>
             </div>
+            {watching.partial && <p className="text-secondary mb-2">This capture is incomplete. Playback or seeking may fail; the partial file can still be downloaded.</p>}
             <video
               src={recordingFileUrl(watching.id)}
               controls
@@ -174,7 +165,7 @@ export default function RecordingsView() {
               className="w-full aspect-video rounded-2xl bg-black"
             />
           </div>
-        </div>
+        </Dialog>
       )}
     </div>
   );
