@@ -136,6 +136,32 @@ with `JavaScript heap out of memory` and never produce a guide — there, use th
 public per-country guides from **Settings → EPG sources** instead, which need
 nothing but the app.
 
+**Pinned image:** the sidecar runs a specific digest of
+`ghcr.io/iptv-org/epg`, not the moving `:master` tag. That tag is a branch, so it
+changes whenever upstream merges — on one occasion it shipped a layout the sidecar's
+start command could not use, and the grabber crash-looped with nothing in this
+repository having changed. Pinning makes the sidecar reproducible and lets you roll
+back by restoring the previous digest.
+
+The cost is that upstream fixes no longer arrive on their own. The grabber scrapes
+~250 sites and those sites change, so when channels start failing to grab, re-pinning
+is the first thing to try:
+
+```bash
+docker buildx imagetools inspect ghcr.io/iptv-org/epg:master
+```
+
+Take the **top-level `Digest:`** — the `application/vnd.oci.image.index.v1+json` line,
+not one of the per-platform manifests listed underneath it; the index is what keeps
+the right architecture selected automatically. Put it in `docker-compose.epg.yml`:
+
+```yaml
+image: ghcr.io/iptv-org/epg:master@sha256:<digest>
+```
+
+then recreate the sidecar with the overlay command above. If the new build misbehaves,
+put the old digest back and recreate again.
+
 Requires Docker Engine ≥ 26 / Compose ≥ 2.24 for the `subpath` volume option; the
 compose file documents the bind-mount fallback for older versions. The grabber
 publishes no host port — only the app can reach it. If you run with
