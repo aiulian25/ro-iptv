@@ -3,11 +3,7 @@
 # ----------------------------------------------------------------------------
 # Stage 1 — build the React/Vite frontend
 # ----------------------------------------------------------------------------
-# Pinned to the *build* platform, not the target: this stage emits static
-# JS/CSS, identical for every architecture. Inert while only linux/amd64 is
-# published, and what makes adding an arch back cheap — without it each extra
-# arch re-runs npm install + vite build under QEMU, ~45min for the same `dist`.
-FROM --platform=$BUILDPLATFORM node:24-alpine@sha256:8a32c8cf649a49915a66e81e7a609223c708d0adabf288ee3f4077d765542f85 AS client-build
+FROM node:24-alpine@sha256:8a32c8cf649a49915a66e81e7a609223c708d0adabf288ee3f4077d765542f85 AS client-build
 WORKDIR /app/client
 COPY client/package*.json ./
 RUN npm ci
@@ -20,11 +16,7 @@ RUN npm run build
 # ----------------------------------------------------------------------------
 # Stage 2 — install backend production deps
 # ----------------------------------------------------------------------------
-# Also build-platform pinned, on the same reasoning. Valid only while every
-# runtime dependency is pure JavaScript (no compiled .node addons), so the
-# installed tree is architecture-independent — a dep with a native binding means
-# dropping this pin before publishing any arch but the build host's.
-FROM --platform=$BUILDPLATFORM node:24-alpine@sha256:8a32c8cf649a49915a66e81e7a609223c708d0adabf288ee3f4077d765542f85 AS server-deps
+FROM node:24-alpine@sha256:8a32c8cf649a49915a66e81e7a609223c708d0adabf288ee3f4077d765542f85 AS server-deps
 WORKDIR /app/server
 COPY server/package*.json ./
 RUN npm ci --omit=dev
