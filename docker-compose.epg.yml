@@ -7,7 +7,13 @@ services:
       EPG_SIDECAR_URL: ${EPG_SIDECAR_URL:-http://epg:3000/guide.xml}
 
   epg:
-    image: ghcr.io/iptv-org/epg:master
+    # Pinned by digest, as the Dockerfile pins its Node base. `:master` is a
+    # floating tag: it moved on 2026-11-05 and shipped a layout the startup
+    # command could not use, breaking the sidecar without anything here
+    # changing. To update deliberately:
+    #   docker buildx imagetools inspect ghcr.io/iptv-org/epg:master
+    # then replace the digest below and recreate the sidecar.
+    image: ghcr.io/iptv-org/epg:master@sha256:bac999d7d651bd50abb1ced4829bfbdc5846018fab1b254e2ab617a8299a9ebe
     container_name: ro-iptv-epg
     restart: unless-stopped
     # The channel list below is mounted from the app's volume, and a mount of a
@@ -38,6 +44,11 @@ services:
       - /bin/sh
       - -ec
       - |
+        # The image's own Dockerfile runs `mkdir /public`, but pm2.config.js reads
+        # `public/channels.xml` relative to WORKDIR=/epg — so the directory the
+        # grabber actually uses is missing from a fresh :master pull, and both the
+        # symlink and the grab fail. Create it before linking.
+        mkdir -p /epg/public
         ln -sfn /run/ro-iptv-epg-input/channels.xml /epg/public/channels.xml
         exec pm2-runtime pm2.config.js
     volumes:
