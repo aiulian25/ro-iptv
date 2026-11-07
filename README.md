@@ -524,7 +524,7 @@ Optional hardening variables (see [`.env.example`](.env.example)):
 | Variable                | Default     | Description                                              |
 | ----------------------- | ----------- | ------------------------------------------------------- |
 | `TRUST_PROXY`           | _empty_     | Reverse-proxy hops to trust for client IP / HTTPS detection. Set `1` behind a TLS proxy. |
-| `CORS_ALLOWED_ORIGINS`  | _empty_     | Comma-separated hosts allowed cross-origin. Empty = any.|
+| `CORS_ALLOWED_ORIGINS`  | _empty_     | Comma-separated origins allowed cross-origin: `host`, `host:port`, or a full `https://host`. Empty or `*` allows any cross-origin **read**; a cross-origin **write** always needs an explicit entry, and an entry naming a scheme must match it exactly. |
 | `HSTS_MAX_AGE`          | `15552000`  | HSTS max-age (seconds); only honored over HTTPS.        |
 | `RATE_LIMIT_DISABLED`   | _empty_     | Set `1` to turn off API rate limiting entirely.         |
 | `RL_UPSTREAM_MAX`       | `120`       | Max upstream-fetch requests/min/IP (playlist/EPG/parse).|

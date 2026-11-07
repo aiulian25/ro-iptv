@@ -181,7 +181,9 @@ const loginLimiter = RL_DISABLED
 // CORS_ALLOWED_ORIGINS: comma-separated domains/origins allowed to call the API
 // cross-origin. Entries may be a full origin, a host, or host:port, with or
 // without scheme (e.g. "tv.example.com, http://192.168.0.10:56892, 10.0.0.5").
-// Unset or "*" → allow any origin (default; the app itself is same-origin anyway).
+// Unset or "*" → allow any origin to READ (default; the app itself is same-origin
+// anyway). Mutations are stricter: only the request's own origin or an explicit
+// entry, never "*" and never an empty list.
 const CORS_ALLOWLIST = (process.env.CORS_ALLOWED_ORIGINS || '')
   .split(',')
   .map((s) => s.trim())
@@ -207,6 +209,26 @@ function isOriginAllowed(origin) {
   });
 }
 
+// Does an explicit entry cover this origin, for a *mutation*? An entry naming a
+// scheme must match exactly, so listing https://host does not also admit
+// http://host. A schemeless entry (host or host:port) matches either scheme — the
+// form the comment above documents, and the form the CORS check already accepts.
+// The two disagreed in 1.4.x: a documented "host:port" entry passed CORS and was
+// silently ignored for every mutation, so a configured client got 403 on each write.
+// "*" and an empty list match nothing here: absent configuration must never mean
+// "any site may write".
+function allowlistPermitsMutation(parsedOrigin) {
+  const target = hostPort(parsedOrigin.origin);
+  const targetHost = target.split(':')[0];
+  return CORS_ALLOWLIST.some((entry) => {
+    if (entry === '*') return false;
+    if (/^https?:\/\//i.test(entry)) return new URL(entry).origin === parsedOrigin.origin;
+    const e = hostPort(entry);
+    if (e === target) return true; // exact host or host:port
+    return !e.includes(':') && e === targetHost; // host-only entry → any port
+  });
+}
+
 app.use(cors({ origin: (origin, cb) => cb(null, isOriginAllowed(origin)) }));
 // Simple same-site forms can carry cookies even when CORS blocks reading their
 // response. Reject browser mutation origins before any route or cookie change.
@@ -218,7 +240,7 @@ app.use('/api', (req, res, next) => {
     try {
       const parsed = new URL(origin);
       allowed = parsed.origin === new URL(`${req.protocol}://${req.get('host')}`).origin ||
-        CORS_ALLOWLIST.some(entry => /^https?:\/\//i.test(entry) && new URL(entry).origin === parsed.origin);
+        allowlistPermitsMutation(parsed);
     } catch { allowed = false; }
   }
   if (!allowed) return res.status(403).json({ error: 'Cross-origin mutation rejected' });
